@@ -1,0 +1,90 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@300;400;500&display=swap');
+
+:root {
+  --border: rgba(124, 109, 255, 0.16);
+  --hair: rgba(255, 255, 255, 0.055);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  background:
+    radial-gradient(1100px 620px at 12% -12%, rgba(108, 99, 255, 0.14), transparent 60%),
+    radial-gradient(800px 500px at 100% 0%, rgba(77, 138, 255, 0.08), transparent 55%),
+    #050508;
+  color: #F2F1F7;
+  font-family: 'Manrope', sans-serif;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* Liquid glass card base */
+.glass {
+  position: relative;
+  background:
+    linear-gradient(155deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.008) 40%, rgba(108, 99, 255, 0.02)),
+    #0A0A10;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  backdrop-filter: blur(18px);
+  overflow: hidden;
+}
+
+.glass::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+}
+
+.card-label {
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: #7B7A8C;
+  font-weight: 600;
+}
+
+.hero-amount-gradient {
+  background: linear-gradient(135deg, #ffffff, #C9C4FF 60%, #8B7FFF);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.hero-ring::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 22px;
+  padding: 1px;
+  background: conic-gradient(from 180deg at 50% 50%, transparent, #8B7FFF, transparent 30%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0.55;
+  animation: spin 8s linear infinite;
+  pointer-events: none;
+}
