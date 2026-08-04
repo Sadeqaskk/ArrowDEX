@@ -69,6 +69,28 @@ export default function DocsPage() {
           <p className="text-dim text-sm mt-1.5">
             Everything here reflects what&apos;s actually built and live today. Nothing on this page is aspirational — the roadmap section at the bottom is clearly marked as what&apos;s next, not what exists.
           </p>
+
+          <a
+            href="https://arrowdexdocs.vercel.app/"
+            target="_blank"
+            rel="noreferrer"
+            className="group relative mt-5 flex items-center justify-between gap-3 overflow-hidden rounded-[16px] border border-indigo-bright/30 bg-gradient-to-br from-indigo-bright/15 via-indigo/10 to-transparent p-4 sm:p-5 transition-all hover:border-indigo-bright/60 hover:shadow-glow"
+          >
+            <span className="pointer-events-none absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/10 to-transparent transition-transform duration-700 group-hover:translate-x-full" />
+            <div className="flex items-center gap-3 min-w-0 relative z-10">
+              <div className="w-10 h-10 rounded-[12px] bg-gradient-to-br from-indigo-bright to-indigo flex items-center justify-center flex-shrink-0 shadow-glow">
+                <BookIcon className="w-5 h-5 text-white" />
+              </div>
+              <div className="min-w-0">
+                <div className="font-bold text-sm text-ivory">Full Arrow DEX Docs</div>
+                <div className="text-[11px] text-dim mt-0.5 font-mono truncate">arrowdexdocs.vercel.app</div>
+              </div>
+            </div>
+            <span className="relative z-10 flex items-center gap-1.5 text-indigo-bright text-xs font-semibold flex-shrink-0 transition-transform group-hover:translate-x-1">
+              Open
+              <ArrowIcon className="w-3.5 h-3.5" />
+            </span>
+          </a>
         </div>
 
         <section className="glass p-5 sm:p-7 mb-6">
@@ -216,6 +238,24 @@ function XIcon({ className }) {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" className={className}>
       <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+    </svg>
+  );
+}
+
+function BookIcon({ className }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+    </svg>
+  );
+}
+
+function ArrowIcon({ className }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M7 17L17 7" />
+      <path d="M7 7h10v10" />
     </svg>
   );
 }
