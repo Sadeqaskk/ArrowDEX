@@ -1,0 +1,15 @@
+name: Trigger ArrowDEX indexer
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call indexer endpoint
+        run: |
+          curl -s -w "\nHTTP_STATUS:%{http_code}\n" -X GET "https://arrowdex.vercel.app/api/indexer/run" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
