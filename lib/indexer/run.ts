@@ -1,5 +1,5 @@
 import { createPublicClient, http, formatUnits, type PublicClient } from 'viem';
-import { supabaseServer } from '@/lib/supabase/server';
+import { getSupabaseServer } from '@/lib/supabase/server';
 import { CHAINS, BLOCK_CHUNK_SIZE } from './chains';
 import { POOL_ABI, SWAP_ABI, VAULT_ABI, CCTP_ABI, AMM_TOKEN_GETTERS_ABI, ERC20_DECIMALS_ABI, VAULT_TOKEN_GETTER_ABI } from './abis';
 
@@ -45,21 +45,21 @@ async function getVaultToken(pc: PublicClient, cacheKey: string, address: `0x${s
 }
 
 async function getCursor(chain: string, contract: string): Promise<bigint> {
-  const { data } = await supabaseServer
+  const { data } = await getSupabaseServer()
     .from('indexer_cursor').select('last_block')
     .eq('chain', chain).eq('contract', contract).maybeSingle();
   return data ? BigInt(data.last_block) : 0n;
 }
 
 async function setCursor(chain: string, contract: string, block: bigint) {
-  await supabaseServer.from('indexer_cursor').upsert({
+  await getSupabaseServer().from('indexer_cursor').upsert({
     chain, contract, last_block: block.toString(), updated_at: new Date().toISOString(),
   });
 }
 
 async function insertEvents(rows: any[]) {
   if (!rows.length) return;
-  const { error } = await supabaseServer
+  const { error } = await getSupabaseServer()
     .from('events')
     .upsert(rows, { onConflict: 'chain,tx_hash,event_type,wallet,amount_in', ignoreDuplicates: true });
   if (error) console.error('insert error', error);
@@ -119,7 +119,6 @@ async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: 
 }
 
 async function scanVault(chainKey: string, address: `0x${string}`, pc: PublicClient) {
-  // Fetched once per (chain, vault) and cached — same as tokenA/tokenB in scanAmm.
   const stakingToken = await getVaultToken(pc, chainKey, address);
   const dec = await getDecimals(pc, stakingToken);
 
