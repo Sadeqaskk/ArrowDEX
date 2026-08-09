@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { runOnce } from '@/lib/bots/run';
+import { runOnce } from '@/lib/botRunner';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
