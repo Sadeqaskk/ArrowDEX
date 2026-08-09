@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { supabaseServer } from '@/lib/supabase/server';
+import { getSupabaseServer } from '@/lib/supabase/server';
 
 const CATEGORY_EVENT_TYPES: Record<string, string[]> = {
   overall: ['swap', 'bridge_burn', 'add_liquidity', 'stake'],
