@@ -15,7 +15,7 @@ const arcViemChain = defineChain({
 const publicClient = createPublicClient({ chain: arcViemChain, transport: http(arc.rpcUrl) });
 
 // Tunables — keep trades small; each bot only spends a slice of its own balance,
-// and the price-impact check refuses to trade a pool it would meaningfully move yes.
+// and the price-impact check refuses to trade a pool it would meaningfully move.
 const MIN_TRADE_PCT = 0.01; // 1% of the bot's balance in the token it's selling
 const MAX_TRADE_PCT = 0.04; // 4%
 const MAX_PRICE_IMPACT_BPS = 300n; // 3% — skip rather than worsen a skewed pool
@@ -35,13 +35,13 @@ function pickRandom<T>(arr: T[]): T {
 
 async function approveIfNeeded(
   walletClient: ReturnType<typeof createWalletClient>,
-  account: `0x${string}`,
+  account: ReturnType<typeof privateKeyToAccount>,
   tokenAddress: `0x${string}`,
   spender: `0x${string}`,
   amount: bigint
 ) {
   const allowance = (await publicClient.readContract({
-    address: tokenAddress, abi: ERC20_ABI, functionName: 'allowance', args: [account, spender],
+    address: tokenAddress, abi: ERC20_ABI, functionName: 'allowance', args: [account.address, spender],
   })) as bigint;
   if (allowance >= amount) return null;
   const hash = await walletClient.writeContract({
@@ -118,7 +118,7 @@ async function tradeOnce(bot: BotConfig) {
 
   const minAmountOut = (amountOut * 99n) / 100n; // 1% slippage tolerance
 
-  await approveIfNeeded(walletClient, account.address, tokenIn.address as `0x${string}`, pool.address as `0x${string}`, amountIn);
+  await approveIfNeeded(walletClient, account, tokenIn.address as `0x${string}`, pool.address as `0x${string}`, amountIn);
 
   let hash: `0x${string}`;
   if (pool.type === 'swap') {
