@@ -14,11 +14,13 @@ const arcViemChain = defineChain({
 
 const publicClient = createPublicClient({ chain: arcViemChain, transport: http(arc.rpcUrl) });
 
-const MIN_TRADE_PCT = 0.01;
-const MAX_TRADE_PCT = 0.04;
-const MAX_PRICE_IMPACT_BPS = 300n;
-const MIN_TOKEN_BALANCE_TO_TRADE = 1;
-const SKIP_PROBABILITY = 0.3;
+// Tunables — keep trades small; each bot only spends a slice of its own balance,
+// and the price-impact check refuses to trade a pool it would meaningfully move.
+const MIN_TRADE_PCT = 0.01; // 1% of the bot's balance in the token it's selling
+const MAX_TRADE_PCT = 0.04; // 4%
+const MAX_PRICE_IMPACT_BPS = 300n; // 3% — skip rather than worsen a skewed pool
+const MIN_TOKEN_BALANCE_TO_TRADE = 1; // human units; skip if below this
+const SKIP_PROBABILITY = 0.3; // ~30% of cron ticks a bot does nothing, so it doesn't look robotic
 
 type BotConfig = { name: string; privateKeyEnv: string };
 
@@ -74,9 +76,11 @@ async function tradeOnce(bot: BotConfig) {
     address: pool.address as `0x${string}`, abi, functionName: 'getReserves',
   })) as [bigint, bigint];
 
-  const onchainTokenA = (await publicClient.readContract({
-    address: pool.address as `0x${string}`, abi, functionName: 'tokenA',
-  })) as string;
+  // getReserves() returns values in the CONTRACT's own tokenA/tokenB order —
+  // resolve which is which by address rather than trusting our config's ordering.
+  const [onchainTokenA] = await Promise.all([
+    publicClient.readContract({ address: pool.address as `0x${string}`, abi, functionName: 'tokenA' }) as Promise<string>,
+  ]);
   const inIsOnchainA = onchainTokenA.toLowerCase() === (tokenIn.address as string).toLowerCase();
   const reserveIn = inIsOnchainA ? reserveARaw : reserveBRaw;
   const reserveOut = inIsOnchainA ? reserveBRaw : reserveARaw;
@@ -102,6 +106,8 @@ async function tradeOnce(bot: BotConfig) {
     args: [amountIn, reserveIn, reserveOut],
   })) as bigint;
 
+  // Price impact vs. current spot price, normalized to a common 1e18 scale so
+  // 6-decimal and 18-decimal pools compare fairly.
   const spotPriceX18 = (reserveOut * 10n ** 18n) / reserveIn;
   const execPriceX18 =
     (amountOut * 10n ** BigInt(tokenIn.decimals) * 10n ** 18n) / (amountIn * 10n ** BigInt(tokenOut.decimals));
@@ -110,7 +116,7 @@ async function tradeOnce(bot: BotConfig) {
     return { bot: bot.name, skipped: true, reason: `price impact too high (${impactBps} bps)` };
   }
 
-  const minAmountOut = (amountOut * 99n) / 100n;
+  const minAmountOut = (amountOut * 99n) / 100n; // 1% slippage tolerance
 
   await approveIfNeeded(walletClient, account.address, tokenIn.address as `0x${string}`, pool.address as `0x${string}`, amountIn);
 
