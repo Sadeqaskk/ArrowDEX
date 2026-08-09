@@ -15,7 +15,7 @@ const arcViemChain = defineChain({
 const publicClient = createPublicClient({ chain: arcViemChain, transport: http(arc.rpcUrl) });
 
 // Tunables — keep trades small; each bot only spends a slice of its own balance,
-// and the price-impact check refuses to trade a pool it would meaningfully move.
+// and the price-impact check refuses to trade a pool it would meaningfully move yes.
 const MIN_TRADE_PCT = 0.01; // 1% of the bot's balance in the token it's selling
 const MAX_TRADE_PCT = 0.04; // 4%
 const MAX_PRICE_IMPACT_BPS = 300n; // 3% — skip rather than worsen a skewed pool
