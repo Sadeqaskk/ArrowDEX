@@ -18,7 +18,7 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: `unknown category: ${category}` }, { status: 400 });
   }
 
-  const { data, error } = await supabaseServer.rpc('leaderboard_top', {
+  const { data, error } = await getSupabaseServer().rpc('leaderboard_top', {
     p_event_types: eventTypes,
     p_limit: limit,
   });
