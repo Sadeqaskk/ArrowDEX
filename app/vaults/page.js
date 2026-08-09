@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import AppShell from '../../components/AppShell';
 import Modal from '../../components/Modal';
 import { useWallet } from '../../lib/WalletContext';
-import { getVaultState, stakeTokens, withdrawTokens, claimRewards, exitVault } from '../../lib/vault';
+import { getVaultState, stakeTokens, withdrawTokens, claimRewards, exitVault, fundAndStartRewards } from '../../lib/vault';
 import { VAULT_CONFIG } from '../../lib/vaultConfig';
 
 export default function VaultsPage() {
@@ -17,6 +17,14 @@ export default function VaultsPage() {
   const [tab, setTab] = useState('stake');
   const [stakeAmount, setStakeAmount] = useState('');
   const [withdrawAmount, setWithdrawAmount] = useState('');
+
+  const [rewardAmount, setRewardAmount] = useState('');
+  const [rewardDurationDays, setRewardDurationDays] = useState('7');
+  const [adminModalOpen, setAdminModalOpen] = useState(false);
+  const [adminStatus, setAdminStatus] = useState('');
+  const [adminError, setAdminError] = useState(null);
+  const [adminDone, setAdminDone] = useState(false);
+  const [adminTxHash, setAdminTxHash] = useState(null);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [modalStatus, setModalStatus] = useState('');
@@ -40,6 +48,9 @@ export default function VaultsPage() {
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  const isOwner = isConnected && vaultState?.owner && address &&
+    vaultState.owner.toLowerCase() === address.toLowerCase();
+
   async function runAction(actionFn) {
     setModalOpen(true);
     setModalDone(false);
@@ -55,6 +66,28 @@ export default function VaultsPage() {
     } catch (err) {
       console.error(err);
       setModalError(err.shortMessage || err.message || 'Transaction failed.');
+    }
+  }
+
+  async function handleFundAndStartRewards() {
+    setAdminModalOpen(true);
+    setAdminDone(false);
+    setAdminError(null);
+    setAdminTxHash(null);
+    try {
+      const hash = await fundAndStartRewards({
+        account: address,
+        amount: rewardAmount,
+        durationSeconds: parseFloat(rewardDurationDays) * 86400,
+        onStatus: setAdminStatus,
+      });
+      setAdminTxHash(hash);
+      setAdminDone(true);
+      setRewardAmount('');
+      refresh();
+    } catch (err) {
+      console.error(err);
+      setAdminError(err.shortMessage || err.message || 'Failed to start new reward period.');
     }
   }
 
@@ -203,6 +236,49 @@ export default function VaultsPage() {
           )}
         </div>
 
+        {isOwner && (
+          <div className="glass p-5 sm:p-7 mt-5 border border-indigo-bright/20">
+            <div className="flex items-center justify-between mb-3 gap-2">
+              <div className="text-[11.5px] text-dim">Admin — restart reward period</div>
+              <span className="text-[10px] uppercase tracking-wide text-indigo-bright font-semibold">Owner only</span>
+            </div>
+            <div className="bg-white/[0.025] border border-white/5 rounded-[16px] p-5 mb-3">
+              <div className="flex justify-between text-[11.5px] text-dim mb-3">
+                <span>ARROW to fund as new rewards</span>
+              </div>
+              <input
+                type="number"
+                value={rewardAmount}
+                onChange={(e) => setRewardAmount(e.target.value)}
+                placeholder="0.00"
+                className="w-full bg-transparent font-mono text-2xl outline-none text-ivory"
+              />
+            </div>
+            <div className="bg-white/[0.025] border border-white/5 rounded-[16px] p-5 mb-3">
+              <div className="flex justify-between text-[11.5px] text-dim mb-3">
+                <span>Duration (days)</span>
+              </div>
+              <input
+                type="number"
+                value={rewardDurationDays}
+                onChange={(e) => setRewardDurationDays(e.target.value)}
+                placeholder="7"
+                className="w-full bg-transparent font-mono text-2xl outline-none text-ivory"
+              />
+            </div>
+            <button
+              onClick={handleFundAndStartRewards}
+              disabled={!rewardAmount || parseFloat(rewardAmount) <= 0 || !rewardDurationDays || parseFloat(rewardDurationDays) <= 0}
+              className="w-full bg-gradient-to-br from-indigo-bright to-indigo text-white font-bold text-[15px] py-4 rounded-[14px] shadow-glow disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Fund &amp; Start New Reward Period
+            </button>
+            <p className="text-[11.5px] text-dim leading-relaxed mt-3">
+              Transfers ARROW into the vault, then sets a new reward rate of (amount ÷ duration) starting now.
+            </p>
+          </div>
+        )}
+
         <div className="mt-6 text-[12px] text-dim leading-relaxed break-all sm:break-normal">
           Vault contract: <a href={`https://testnet.arcscan.app/address/${VAULT_CONFIG.vault.address}`} target="_blank" rel="noreferrer" className="text-indigo-bright font-mono">{VAULT_CONFIG.vault.address.slice(0, 10)}…{VAULT_CONFIG.vault.address.slice(-8)}</a>
           {' '}· No lock period — withdraw anytime. Rewards accrue continuously while staked.
@@ -230,6 +306,32 @@ export default function VaultsPage() {
         )}
         {(modalDone || modalError) && (
           <button onClick={() => setModalOpen(false)} className="w-full mt-6 bg-gradient-to-br from-indigo-bright to-indigo text-white font-bold text-[14px] py-3.5 rounded-[13px] shadow-glow">
+            Close
+          </button>
+        )}
+      </Modal>
+
+      <Modal open={adminModalOpen} onClose={() => setAdminModalOpen(false)} closeable={adminDone || !!adminError}>
+        <div className="mb-5">
+          <div className="card-label mb-2">{adminDone ? 'Complete' : adminError ? 'Failed' : 'In Progress'}</div>
+          <h2 className="text-xl font-bold">Restarting Reward Period</h2>
+        </div>
+        {!adminDone && !adminError && (
+          <div className="flex items-center gap-3 text-sm text-ivory">
+            <span className="w-4 h-4 rounded-full border-2 border-indigo-bright border-t-transparent animate-spin" />
+            {adminStatus}
+          </div>
+        )}
+        {adminDone && adminTxHash && (
+          <a href={`https://testnet.arcscan.app/tx/${adminTxHash}`} target="_blank" rel="noreferrer" className="text-indigo-bright text-sm font-mono">
+            View transaction →
+          </a>
+        )}
+        {adminError && (
+          <div className="text-sm text-danger bg-danger/10 border border-danger/25 rounded-[12px] p-3.5">{adminError}</div>
+        )}
+        {(adminDone || adminError) && (
+          <button onClick={() => setAdminModalOpen(false)} className="w-full mt-6 bg-gradient-to-br from-indigo-bright to-indigo text-white font-bold text-[14px] py-3.5 rounded-[13px] shadow-glow">
             Close
           </button>
         )}

@@ -74,6 +74,17 @@ export const NAV_ITEMS = [
     ),
   },
   {
+    href: '/leaderboard',
+    label: 'Leaderboard',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <rect x="3" y="14" width="5" height="7" rx="1" />
+        <rect x="9.5" y="9" width="5" height="12" rx="1" />
+        <rect x="16" y="12" width="5" height="9" rx="1" />
+      </svg>
+    ),
+  },
+  {
     href: '/docs',
     label: 'Docs',
     icon: (
