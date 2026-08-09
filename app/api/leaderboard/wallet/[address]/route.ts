@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { getSupabaseServer } from '@/lib/supabase/server';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET(req: Request, { params }: { params: { address: string } }) {
   const wallet = params.address.toLowerCase();
 
