@@ -105,7 +105,7 @@ export default function Topbar() {
             </button>
 
             {faucetOpen && (
-              <div className="absolute top-[calc(100%+8px)] right-0 z-30 min-w-[240px] bg-[#0E0E16] border border-white/10 rounded-[16px] shadow-2xl shadow-black/60 overflow-hidden py-1.5">
+              <div className="absolute top-[calc(100%+8px)] right-0 z-30 w-[min(240px,calc(100vw-2rem))] bg-[#0E0E16] border border-white/10 rounded-[16px] shadow-2xl shadow-black/60 overflow-hidden py-1.5">
                 <div className="px-4 py-3 border-b border-white/5">
                   <div className="text-[11px] text-dim">Testnet ARROW faucet</div>
                   <div className="text-sm font-mono mt-0.5">
