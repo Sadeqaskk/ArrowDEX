@@ -10,6 +10,25 @@ const SWAP_FEE_BPS = 30n;
 // even though we scan several contracts across several chains in one call.
 const TIME_BUDGET_MS = 45_000;
 
+// Retry wrapper for RPC calls that can hit a "rate limit exceeded" error —
+// waits with increasing backoff and tries again, instead of failing the whole scan.
+async function withRateLimitRetry<T>(fn: () => Promise<T>, maxRetries = 4): Promise<T> {
+  let lastErr: any;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastErr = err;
+      const msg = (err?.message || String(err)).toLowerCase();
+      const isRateLimit = msg.includes('rate limit') || msg.includes('exceeds defined limit');
+      if (!isRateLimit || attempt === maxRetries) throw err;
+      const delay = 500 * Math.pow(2, attempt); // 500ms, 1s, 2s, 4s
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  throw lastErr;
+}
+
 function rpcClient(chainKey: keyof typeof CHAINS): PublicClient {
   const url = process.env[CHAINS[chainKey].rpcEnv];
   if (!url) throw new Error(`Missing env var ${CHAINS[chainKey].rpcEnv}`);
@@ -20,7 +39,9 @@ const decimalsCache = new Map<string, number>();
 async function getDecimals(pc: PublicClient, token: `0x${string}`) {
   const key = token.toLowerCase();
   if (decimalsCache.has(key)) return decimalsCache.get(key)!;
-  const d = await pc.readContract({ address: token, abi: ERC20_DECIMALS_ABI, functionName: 'decimals' });
+  const d = await withRateLimitRetry(() =>
+    pc.readContract({ address: token, abi: ERC20_DECIMALS_ABI, functionName: 'decimals' })
+  );
   decimalsCache.set(key, d as number);
   return d as number;
 }
@@ -29,8 +50,12 @@ const tokensCache = new Map<string, { tokenA: `0x${string}`; tokenB: `0x${string
 async function getPoolTokens(pc: PublicClient, cacheKey: string, address: `0x${string}`) {
   if (tokensCache.has(cacheKey)) return tokensCache.get(cacheKey)!;
   const [tokenA, tokenB] = await Promise.all([
-    pc.readContract({ address, abi: AMM_TOKEN_GETTERS_ABI, functionName: 'tokenA' }) as Promise<`0x${string}`>,
-    pc.readContract({ address, abi: AMM_TOKEN_GETTERS_ABI, functionName: 'tokenB' }) as Promise<`0x${string}`>,
+    withRateLimitRetry(() =>
+      pc.readContract({ address, abi: AMM_TOKEN_GETTERS_ABI, functionName: 'tokenA' })
+    ) as Promise<`0x${string}`>,
+    withRateLimitRetry(() =>
+      pc.readContract({ address, abi: AMM_TOKEN_GETTERS_ABI, functionName: 'tokenB' })
+    ) as Promise<`0x${string}`>,
   ]);
   const result = { tokenA, tokenB };
   tokensCache.set(cacheKey, result);
@@ -40,9 +65,9 @@ async function getPoolTokens(pc: PublicClient, cacheKey: string, address: `0x${s
 const vaultTokenCache = new Map<string, `0x${string}`>();
 async function getVaultToken(pc: PublicClient, cacheKey: string, address: `0x${string}`) {
   if (vaultTokenCache.has(cacheKey)) return vaultTokenCache.get(cacheKey)!;
-  const token = (await pc.readContract({
-    address, abi: VAULT_TOKEN_GETTER_ABI, functionName: 'stakingToken',
-  })) as `0x${string}`;
+  const token = (await withRateLimitRetry(() =>
+    pc.readContract({ address, abi: VAULT_TOKEN_GETTER_ABI, functionName: 'stakingToken' })
+  )) as `0x${string}`;
   vaultTokenCache.set(cacheKey, token);
   return token;
 }
@@ -69,7 +94,7 @@ async function insertEvents(rows: any[]) {
 }
 
 async function blockTimestamp(pc: PublicClient, blockNumber: bigint) {
-  const block = await pc.getBlock({ blockNumber });
+  const block = await withRateLimitRetry(() => pc.getBlock({ blockNumber }));
   return new Date(Number(block.timestamp) * 1000).toISOString();
 }
 
@@ -82,7 +107,9 @@ async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: 
 
   while (cursor < latest && Date.now() - runStartTime < TIME_BUDGET_MS) {
     const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-    const logs = await pc.getLogs({ address, events: abi, fromBlock: cursor + 1n, toBlock });
+    const logs = await withRateLimitRetry(() =>
+      pc.getLogs({ address, events: abi, fromBlock: cursor + 1n, toBlock })
+    );
     const rows = [];
 
     for (const log of logs as any[]) {
@@ -130,7 +157,9 @@ async function scanVault(chainKey: string, address: `0x${string}`, pc: PublicCli
 
   while (cursor < latest && Date.now() - runStartTime < TIME_BUDGET_MS) {
     const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-    const logs = await pc.getLogs({ address, events: VAULT_ABI, fromBlock: cursor + 1n, toBlock });
+    const logs = await withRateLimitRetry(() =>
+      pc.getLogs({ address, events: VAULT_ABI, fromBlock: cursor + 1n, toBlock })
+    );
     const rows = [];
 
     for (const log of logs as any[]) {
@@ -154,7 +183,9 @@ async function scanCctp(chainKey: string, address: `0x${string}`, pc: PublicClie
 
   while (cursor < latest && Date.now() - runStartTime < TIME_BUDGET_MS) {
     const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-    const logs = await pc.getLogs({ address, events: CCTP_ABI, fromBlock: cursor + 1n, toBlock });
+    const logs = await withRateLimitRetry(() =>
+      pc.getLogs({ address, events: CCTP_ABI, fromBlock: cursor + 1n, toBlock })
+    );
     const rows = [];
 
     for (const log of logs as any[]) {
