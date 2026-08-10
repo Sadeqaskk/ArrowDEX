@@ -22,5 +22,6 @@ export const CHAINS = {
 } as const;
 
 // Keep this small — a Vercel serverless function has a time limit (see route.ts maxDuration).
-// 10-minute cron + a few hundred blocks per chunk should comfortably keep each run fast on testnet volume.
-export const BLOCK_CHUNK_SIZE = 2000n;
+// Smaller chunks mean less work (and less RPC load) per cron tick, so a run finishes
+// well within the time budget even when there's a backlog to catch up on.
+export const BLOCK_CHUNK_SIZE = 100n;

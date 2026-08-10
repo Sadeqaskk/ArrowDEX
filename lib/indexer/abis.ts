@@ -72,7 +72,7 @@ export const VAULT_ABI = [
 // indexes burnToken + nonce instead — don't swap this back to V1's signature).
 export const CCTP_ABI = [
   { type: 'event', name: 'DepositForBurn', inputs: [
-    { indexed: false, name: 'burnToken', type: 'address' },
+    { indexed: true, name: 'burnToken', type: 'address' },
     { indexed: false, name: 'amount', type: 'uint256' },
     { indexed: true, name: 'depositor', type: 'address' },
     { indexed: false, name: 'mintRecipient', type: 'bytes32' },
@@ -80,7 +80,7 @@ export const CCTP_ABI = [
     { indexed: false, name: 'destinationTokenMessenger', type: 'bytes32' },
     { indexed: false, name: 'destinationCaller', type: 'bytes32' },
     { indexed: false, name: 'maxFee', type: 'uint256' },
-    { indexed: false, name: 'minFinalityThreshold', type: 'uint32' },
+    { indexed: true, name: 'minFinalityThreshold', type: 'uint32' },
     { indexed: false, name: 'hookData', type: 'bytes' },
   ]},
 ] as const;
