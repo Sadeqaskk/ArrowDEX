@@ -5,9 +5,9 @@ import { POOL_ABI, SWAP_ABI, VAULT_ABI, CCTP_ABI, AMM_TOKEN_GETTERS_ABI, ERC20_D
 
 const SWAP_FEE_BPS = 30n;
 
-// Stop scanning with a buffer before Vercel's function time limit hits, and
-// just pick up where the cursor left off on the next cron run — safer than
-// risking a hard FUNCTION_INVOCATION_TIMEOUT mid-request.
+// Shared across the WHOLE runOnce() call (all chains, all contracts) — not
+// per scan function — so the total request time stays under Vercel's limit
+// even though we scan several contracts across several chains in one call.
 const TIME_BUDGET_MS = 45_000;
 
 function rpcClient(chainKey: keyof typeof CHAINS): PublicClient {
@@ -37,8 +37,6 @@ async function getPoolTokens(pc: PublicClient, cacheKey: string, address: `0x${s
   return result;
 }
 
-// The vault wraps a separate staking token rather than being one itself —
-// fetched once per (chain, vault contract) and cached, same pattern as getPoolTokens.
 const vaultTokenCache = new Map<string, `0x${string}`>();
 async function getVaultToken(pc: PublicClient, cacheKey: string, address: `0x${string}`) {
   if (vaultTokenCache.has(cacheKey)) return vaultTokenCache.get(cacheKey)!;
@@ -75,15 +73,14 @@ async function blockTimestamp(pc: PublicClient, blockNumber: bigint) {
   return new Date(Number(block.timestamp) * 1000).toISOString();
 }
 
-async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: `0x${string}`, abi: any, pc: PublicClient) {
-  const startTime = Date.now();
+async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: `0x${string}`, abi: any, pc: PublicClient, runStartTime: number) {
   const { tokenA, tokenB } = await getPoolTokens(pc, `${chainKey}:${contractKey}`, address);
   const [decA, decB] = await Promise.all([getDecimals(pc, tokenA), getDecimals(pc, tokenB)]);
 
   let cursor = await getCursor(chainKey, contractKey);
   const latest = await pc.getBlockNumber();
 
-  while (cursor < latest && Date.now() - startTime < TIME_BUDGET_MS) {
+  while (cursor < latest && Date.now() - runStartTime < TIME_BUDGET_MS) {
     const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
     const logs = await pc.getLogs({ address, events: abi, fromBlock: cursor + 1n, toBlock });
     const rows = [];
@@ -124,16 +121,14 @@ async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: 
   }
 }
 
-async function scanVault(chainKey: string, address: `0x${string}`, pc: PublicClient) {
-  const startTime = Date.now();
-  // Fetched once per (chain, vault) and cached — same as tokenA/tokenB in scanAmm.
+async function scanVault(chainKey: string, address: `0x${string}`, pc: PublicClient, runStartTime: number) {
   const stakingToken = await getVaultToken(pc, chainKey, address);
   const dec = await getDecimals(pc, stakingToken);
 
   let cursor = await getCursor(chainKey, 'vault');
   const latest = await pc.getBlockNumber();
 
-  while (cursor < latest && Date.now() - startTime < TIME_BUDGET_MS) {
+  while (cursor < latest && Date.now() - runStartTime < TIME_BUDGET_MS) {
     const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
     const logs = await pc.getLogs({ address, events: VAULT_ABI, fromBlock: cursor + 1n, toBlock });
     const rows = [];
@@ -153,12 +148,11 @@ async function scanVault(chainKey: string, address: `0x${string}`, pc: PublicCli
   }
 }
 
-async function scanCctp(chainKey: string, address: `0x${string}`, pc: PublicClient) {
-  const startTime = Date.now();
+async function scanCctp(chainKey: string, address: `0x${string}`, pc: PublicClient, runStartTime: number) {
   let cursor = await getCursor(chainKey, 'cctp');
   const latest = await pc.getBlockNumber();
 
-  while (cursor < latest && Date.now() - startTime < TIME_BUDGET_MS) {
+  while (cursor < latest && Date.now() - runStartTime < TIME_BUDGET_MS) {
     const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
     const logs = await pc.getLogs({ address, events: CCTP_ABI, fromBlock: cursor + 1n, toBlock });
     const rows = [];
@@ -181,14 +175,20 @@ async function scanCctp(chainKey: string, address: `0x${string}`, pc: PublicClie
 }
 
 export async function runOnce() {
+  const runStartTime = Date.now();
   const results: Record<string, string> = {};
+
   for (const [chainKey, cfg] of Object.entries(CHAINS)) {
+    if (Date.now() - runStartTime > TIME_BUDGET_MS) {
+      results[chainKey] = 'skipped: time budget exhausted, will resume next run';
+      continue;
+    }
     const pc = rpcClient(chainKey as keyof typeof CHAINS);
     try {
-      if ('pool' in cfg.contracts) await scanAmm(chainKey, 'pool', cfg.contracts.pool as `0x${string}`, POOL_ABI, pc);
-      if ('swap' in cfg.contracts) await scanAmm(chainKey, 'swap', cfg.contracts.swap as `0x${string}`, SWAP_ABI, pc);
-      if ('vault' in cfg.contracts) await scanVault(chainKey, cfg.contracts.vault as `0x${string}`, pc);
-      if ('cctp' in cfg.contracts) await scanCctp(chainKey, cfg.contracts.cctp as `0x${string}`, pc);
+      if ('pool' in cfg.contracts) await scanAmm(chainKey, 'pool', cfg.contracts.pool as `0x${string}`, POOL_ABI, pc, runStartTime);
+      if ('swap' in cfg.contracts) await scanAmm(chainKey, 'swap', cfg.contracts.swap as `0x${string}`, SWAP_ABI, pc, runStartTime);
+      if ('vault' in cfg.contracts) await scanVault(chainKey, cfg.contracts.vault as `0x${string}`, pc, runStartTime);
+      if ('cctp' in cfg.contracts) await scanCctp(chainKey, cfg.contracts.cctp as `0x${string}`, pc, runStartTime);
       results[chainKey] = 'ok';
     } catch (err: any) {
       console.error(`[${chainKey}] scan error:`, err.message);
