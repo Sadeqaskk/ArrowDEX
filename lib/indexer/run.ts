@@ -5,16 +5,30 @@ import { POOL_ABI, SWAP_ABI, VAULT_ABI, CCTP_ABI, AMM_TOKEN_GETTERS_ABI, ERC20_D
 
 const SWAP_FEE_BPS = 30n;
 
-// Shared across the WHOLE runOnce() call (all chains, all contracts) — not
-// per scan function — so the total request time stays under Vercel's limit
-// even though we scan several contracts across several chains in one call.
 const TIME_BUDGET_MS = 45_000;
 
-// Retry wrapper for RPC calls that can hit a "rate limit exceeded" error —
-// waits with increasing backoff and tries again, instead of failing the whole scan.
-async function withRateLimitRetry<T>(fn: () => Promise<T>, maxRetries = 4): Promise<T> {
+// Minimum gap enforced between ANY two RPC calls, globally — this is what
+// actually prevents hitting Arc's rate limit in the first place, rather than
+// just retrying after we've already been rejected.
+const MIN_REQUEST_INTERVAL_MS = 400;
+let lastRequestTime = 0;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function pace() {
+  const now = Date.now();
+  const wait = lastRequestTime + MIN_REQUEST_INTERVAL_MS - now;
+  if (wait > 0) await sleep(wait);
+  lastRequestTime = Date.now();
+}
+
+// Paces every call AND retries with backoff if it still gets rate-limited.
+async function rpcCall<T>(fn: () => Promise<T>, maxRetries = 5): Promise<T> {
   let lastErr: any;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    await pace();
     try {
       return await fn();
     } catch (err: any) {
@@ -22,8 +36,8 @@ async function withRateLimitRetry<T>(fn: () => Promise<T>, maxRetries = 4): Prom
       const msg = (err?.message || String(err)).toLowerCase();
       const isRateLimit = msg.includes('rate limit') || msg.includes('exceeds defined limit');
       if (!isRateLimit || attempt === maxRetries) throw err;
-      const delay = 500 * Math.pow(2, attempt); // 500ms, 1s, 2s, 4s
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      const delay = 1000 * Math.pow(2, attempt); // 1s, 2s, 4s, 8s, 16s
+      await sleep(delay);
     }
   }
   throw lastErr;
@@ -39,7 +53,7 @@ const decimalsCache = new Map<string, number>();
 async function getDecimals(pc: PublicClient, token: `0x${string}`) {
   const key = token.toLowerCase();
   if (decimalsCache.has(key)) return decimalsCache.get(key)!;
-  const d = await withRateLimitRetry(() =>
+  const d = await rpcCall(() =>
     pc.readContract({ address: token, abi: ERC20_DECIMALS_ABI, functionName: 'decimals' })
   );
   decimalsCache.set(key, d as number);
@@ -49,14 +63,14 @@ async function getDecimals(pc: PublicClient, token: `0x${string}`) {
 const tokensCache = new Map<string, { tokenA: `0x${string}`; tokenB: `0x${string}` }>();
 async function getPoolTokens(pc: PublicClient, cacheKey: string, address: `0x${string}`) {
   if (tokensCache.has(cacheKey)) return tokensCache.get(cacheKey)!;
-  const [tokenA, tokenB] = await Promise.all([
-    withRateLimitRetry(() =>
-      pc.readContract({ address, abi: AMM_TOKEN_GETTERS_ABI, functionName: 'tokenA' })
-    ) as Promise<`0x${string}`>,
-    withRateLimitRetry(() =>
-      pc.readContract({ address, abi: AMM_TOKEN_GETTERS_ABI, functionName: 'tokenB' })
-    ) as Promise<`0x${string}`>,
-  ]);
+  // Sequential, not Promise.all — firing both at once was likely part of
+  // what tripped Arc's rate limit.
+  const tokenA = (await rpcCall(() =>
+    pc.readContract({ address, abi: AMM_TOKEN_GETTERS_ABI, functionName: 'tokenA' })
+  )) as `0x${string}`;
+  const tokenB = (await rpcCall(() =>
+    pc.readContract({ address, abi: AMM_TOKEN_GETTERS_ABI, functionName: 'tokenB' })
+  )) as `0x${string}`;
   const result = { tokenA, tokenB };
   tokensCache.set(cacheKey, result);
   return result;
@@ -65,7 +79,7 @@ async function getPoolTokens(pc: PublicClient, cacheKey: string, address: `0x${s
 const vaultTokenCache = new Map<string, `0x${string}`>();
 async function getVaultToken(pc: PublicClient, cacheKey: string, address: `0x${string}`) {
   if (vaultTokenCache.has(cacheKey)) return vaultTokenCache.get(cacheKey)!;
-  const token = (await withRateLimitRetry(() =>
+  const token = (await rpcCall(() =>
     pc.readContract({ address, abi: VAULT_TOKEN_GETTER_ABI, functionName: 'stakingToken' })
   )) as `0x${string}`;
   vaultTokenCache.set(cacheKey, token);
@@ -94,20 +108,21 @@ async function insertEvents(rows: any[]) {
 }
 
 async function blockTimestamp(pc: PublicClient, blockNumber: bigint) {
-  const block = await withRateLimitRetry(() => pc.getBlock({ blockNumber }));
+  const block = await rpcCall(() => pc.getBlock({ blockNumber }));
   return new Date(Number(block.timestamp) * 1000).toISOString();
 }
 
 async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: `0x${string}`, abi: any, pc: PublicClient, runStartTime: number) {
   const { tokenA, tokenB } = await getPoolTokens(pc, `${chainKey}:${contractKey}`, address);
-  const [decA, decB] = await Promise.all([getDecimals(pc, tokenA), getDecimals(pc, tokenB)]);
+  const decA = await getDecimals(pc, tokenA);
+  const decB = await getDecimals(pc, tokenB);
 
   let cursor = await getCursor(chainKey, contractKey);
-  const latest = await pc.getBlockNumber();
+  const latest = await rpcCall(() => pc.getBlockNumber());
 
   while (cursor < latest && Date.now() - runStartTime < TIME_BUDGET_MS) {
     const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-    const logs = await withRateLimitRetry(() =>
+    const logs = await rpcCall(() =>
       pc.getLogs({ address, events: abi, fromBlock: cursor + 1n, toBlock })
     );
     const rows = [];
@@ -153,11 +168,11 @@ async function scanVault(chainKey: string, address: `0x${string}`, pc: PublicCli
   const dec = await getDecimals(pc, stakingToken);
 
   let cursor = await getCursor(chainKey, 'vault');
-  const latest = await pc.getBlockNumber();
+  const latest = await rpcCall(() => pc.getBlockNumber());
 
   while (cursor < latest && Date.now() - runStartTime < TIME_BUDGET_MS) {
     const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-    const logs = await withRateLimitRetry(() =>
+    const logs = await rpcCall(() =>
       pc.getLogs({ address, events: VAULT_ABI, fromBlock: cursor + 1n, toBlock })
     );
     const rows = [];
@@ -179,11 +194,11 @@ async function scanVault(chainKey: string, address: `0x${string}`, pc: PublicCli
 
 async function scanCctp(chainKey: string, address: `0x${string}`, pc: PublicClient, runStartTime: number) {
   let cursor = await getCursor(chainKey, 'cctp');
-  const latest = await pc.getBlockNumber();
+  const latest = await rpcCall(() => pc.getBlockNumber());
 
   while (cursor < latest && Date.now() - runStartTime < TIME_BUDGET_MS) {
     const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-    const logs = await withRateLimitRetry(() =>
+    const logs = await rpcCall(() =>
       pc.getLogs({ address, events: CCTP_ABI, fromBlock: cursor + 1n, toBlock })
     );
     const rows = [];
