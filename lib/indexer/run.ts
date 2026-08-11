@@ -105,9 +105,16 @@ async function insertEvents(rows: any[]) {
   if (error) console.error('insert error', error);
 }
 
-async function blockTimestamp(pc: PublicClient, blockNumber: bigint) {
+const blockTimestampCacheByChain = new Map<string, string>();
+
+async function blockTimestamp(pc: PublicClient, chainKey: string, blockNumber: bigint) {
+  const key = `${chainKey}:${blockNumber}`;
+  const cached = blockTimestampCacheByChain.get(key);
+  if (cached) return cached;
   const block = await rpcCall(() => pc.getBlock({ blockNumber }));
-  return new Date(Number(block.timestamp) * 1000).toISOString();
+  const ts = new Date(Number(block.timestamp) * 1000).toISOString();
+  blockTimestampCacheByChain.set(key, ts);
+  return ts;
 }
 
 async function getLogsPerEvent(pc: PublicClient, address: `0x${string}`, abi: any[], fromBlock: bigint, toBlock: bigint) {
@@ -135,7 +142,7 @@ async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: 
     const rows = [];
 
     for (const log of logs as any[]) {
-      const ts = await blockTimestamp(pc, log.blockNumber);
+      const ts = await blockTimestamp(pc, chainKey, log.blockNumber);
       const base = { chain: chainKey, contract: contractKey, tx_hash: log.transactionHash, block_number: Number(log.blockNumber), block_timestamp: ts, raw: log };
 
       if (log.eventName === 'Swap') {
@@ -183,7 +190,7 @@ async function scanVault(chainKey: string, address: `0x${string}`, pc: PublicCli
     const rows = [];
 
     for (const log of logs as any[]) {
-      const ts = await blockTimestamp(pc, log.blockNumber);
+      const ts = await blockTimestamp(pc, chainKey, log.blockNumber);
       const base = { chain: chainKey, contract: 'vault', tx_hash: log.transactionHash, block_number: Number(log.blockNumber), block_timestamp: ts, raw: log };
       if (log.eventName === 'Staked') {
         rows.push({ ...base, event_type: 'stake', wallet: log.args.user, amount_in: formatUnits(log.args.amount, dec) });
@@ -207,7 +214,7 @@ async function scanCctp(chainKey: string, address: `0x${string}`, pc: PublicClie
     const rows = [];
 
     for (const log of logs as any[]) {
-      const ts = await blockTimestamp(pc, log.blockNumber);
+      const ts = await blockTimestamp(pc, chainKey, log.blockNumber);
       const decIn = await getDecimals(pc, log.args.burnToken as `0x${string}`);
       rows.push({
         chain: chainKey, contract: 'cctp', event_type: 'bridge_burn',
