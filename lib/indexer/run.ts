@@ -7,9 +7,6 @@ const SWAP_FEE_BPS = 30n;
 
 const TIME_BUDGET_MS = 45_000;
 
-// Minimum gap enforced between ANY two RPC calls, globally — this is what
-// actually prevents hitting Arc's rate limit in the first place, rather than
-// just retrying after we've already been rejected.
 const MIN_REQUEST_INTERVAL_MS = 400;
 let lastRequestTime = 0;
 
@@ -24,7 +21,6 @@ async function pace() {
   lastRequestTime = Date.now();
 }
 
-// Paces every call AND retries with backoff if it still gets rate-limited.
 async function rpcCall<T>(fn: () => Promise<T>, maxRetries = 5): Promise<T> {
   let lastErr: any;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -36,7 +32,7 @@ async function rpcCall<T>(fn: () => Promise<T>, maxRetries = 5): Promise<T> {
       const msg = (err?.message || String(err)).toLowerCase();
       const isRateLimit = msg.includes('rate limit') || msg.includes('exceeds defined limit');
       if (!isRateLimit || attempt === maxRetries) throw err;
-      const delay = 1000 * Math.pow(2, attempt); // 1s, 2s, 4s, 8s, 16s
+      const delay = 1000 * Math.pow(2, attempt);
       await sleep(delay);
     }
   }
@@ -63,8 +59,6 @@ async function getDecimals(pc: PublicClient, token: `0x${string}`) {
 const tokensCache = new Map<string, { tokenA: `0x${string}`; tokenB: `0x${string}` }>();
 async function getPoolTokens(pc: PublicClient, cacheKey: string, address: `0x${string}`) {
   if (tokensCache.has(cacheKey)) return tokensCache.get(cacheKey)!;
-  // Sequential, not Promise.all — firing both at once was likely part of
-  // what tripped Arc's rate limit.
   const tokenA = (await rpcCall(() =>
     pc.readContract({ address, abi: AMM_TOKEN_GETTERS_ABI, functionName: 'tokenA' })
   )) as `0x${string}`;
@@ -112,6 +106,23 @@ async function blockTimestamp(pc: PublicClient, blockNumber: bigint) {
   return new Date(Number(block.timestamp) * 1000).toISOString();
 }
 
+// Queries each event in the ABI SEPARATELY (one getLogs call per event name)
+// instead of combining them into one OR'd topic filter — some RPCs (Arc's
+// testnet node included) reject multi-topic0 log queries outright.
+async function getLogsPerEvent(pc: PublicClient, address: `0x${string}`, abi: any[], fromBlock: bigint, toBlock: bigint) {
+  const eventAbis = abi.filter((item) => item.type === 'event');
+  const allLogs: any[] = [];
+  for (const eventAbi of eventAbis) {
+    const logs = await rpcCall(() =>
+      pc.getLogs({ address, event: eventAbi, fromBlock, toBlock })
+    );
+    allLogs.push(...(logs as any[]));
+  }
+  // Keep them in block order like a combined query would have returned
+  allLogs.sort((a, b) => Number(a.blockNumber - b.blockNumber) || a.logIndex - b.logIndex);
+  return allLogs;
+}
+
 async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: `0x${string}`, abi: any, pc: PublicClient, runStartTime: number) {
   const { tokenA, tokenB } = await getPoolTokens(pc, `${chainKey}:${contractKey}`, address);
   const decA = await getDecimals(pc, tokenA);
@@ -122,9 +133,7 @@ async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: 
 
   while (cursor < latest && Date.now() - runStartTime < TIME_BUDGET_MS) {
     const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-    const logs = await rpcCall(() =>
-      pc.getLogs({ address, events: abi, fromBlock: cursor + 1n, toBlock })
-    );
+    const logs = await getLogsPerEvent(pc, address, abi, cursor + 1n, toBlock);
     const rows = [];
 
     for (const log of logs as any[]) {
@@ -172,9 +181,7 @@ async function scanVault(chainKey: string, address: `0x${string}`, pc: PublicCli
 
   while (cursor < latest && Date.now() - runStartTime < TIME_BUDGET_MS) {
     const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-    const logs = await rpcCall(() =>
-      pc.getLogs({ address, events: VAULT_ABI, fromBlock: cursor + 1n, toBlock })
-    );
+    const logs = await getLogsPerEvent(pc, address, VAULT_ABI as unknown as any[], cursor + 1n, toBlock);
     const rows = [];
 
     for (const log of logs as any[]) {
@@ -198,9 +205,7 @@ async function scanCctp(chainKey: string, address: `0x${string}`, pc: PublicClie
 
   while (cursor < latest && Date.now() - runStartTime < TIME_BUDGET_MS) {
     const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-    const logs = await rpcCall(() =>
-      pc.getLogs({ address, events: CCTP_ABI, fromBlock: cursor + 1n, toBlock })
-    );
+    const logs = await getLogsPerEvent(pc, address, CCTP_ABI as unknown as any[], cursor + 1n, toBlock);
     const rows = [];
 
     for (const log of logs as any[]) {
