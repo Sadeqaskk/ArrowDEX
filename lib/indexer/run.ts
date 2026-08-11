@@ -4,13 +4,11 @@ import { CHAINS, BLOCK_CHUNK_SIZE } from './chains';
 import { POOL_ABI, SWAP_ABI, VAULT_ABI, CCTP_ABI, AMM_TOKEN_GETTERS_ABI, ERC20_DECIMALS_ABI, VAULT_TOKEN_GETTER_ABI } from './abis';
 
 const SWAP_FEE_BPS = 30n;
-const TIME_BUDGET_MS = 45_000;
-
-// Arc's RPC limit turned out to be about REQUEST FREQUENCY, not block range
-// size (confirmed: even a single-block query got rejected) — so the fix is
-// slowing down between requests, not splitting ranges into more requests.
+const TIME_BUDGET_MS = 40_000; // a bit more headroom below Vercel's limit
 const MIN_REQUEST_INTERVAL_MS = 2500;
 let lastRequestTime = 0;
+
+class BudgetExceededError extends Error {}
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -28,16 +26,17 @@ function isLimitError(err: any) {
   return msg.includes('rate limit') || msg.includes('exceeds defined limit');
 }
 
-async function rpcCall<T>(fn: () => Promise<T>, maxRetries = 4): Promise<T> {
+async function rpcCall<T>(fn: () => Promise<T>, deadline: number, maxRetries = 3): Promise<T> {
   let lastErr: any;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (Date.now() > deadline) throw new BudgetExceededError();
     await pace();
     try {
       return await fn();
     } catch (err: any) {
       lastErr = err;
       if (!isLimitError(err) || attempt === maxRetries) throw err;
-      await sleep(3000 * Math.pow(2, attempt)); // 3s, 6s, 12s, 24s
+      await sleep(3000 * Math.pow(2, attempt));
     }
   }
   throw lastErr;
@@ -50,24 +49,24 @@ function rpcClient(chainKey: keyof typeof CHAINS): PublicClient {
 }
 
 const decimalsCache = new Map<string, number>();
-async function getDecimals(pc: PublicClient, token: `0x${string}`) {
+async function getDecimals(pc: PublicClient, token: `0x${string}`, deadline: number) {
   const key = token.toLowerCase();
   if (decimalsCache.has(key)) return decimalsCache.get(key)!;
   const d = await rpcCall(() =>
-    pc.readContract({ address: token, abi: ERC20_DECIMALS_ABI, functionName: 'decimals' })
+    pc.readContract({ address: token, abi: ERC20_DECIMALS_ABI, functionName: 'decimals' }), deadline
   );
   decimalsCache.set(key, d as number);
   return d as number;
 }
 
 const tokensCache = new Map<string, { tokenA: `0x${string}`; tokenB: `0x${string}` }>();
-async function getPoolTokens(pc: PublicClient, cacheKey: string, address: `0x${string}`) {
+async function getPoolTokens(pc: PublicClient, cacheKey: string, address: `0x${string}`, deadline: number) {
   if (tokensCache.has(cacheKey)) return tokensCache.get(cacheKey)!;
   const tokenA = (await rpcCall(() =>
-    pc.readContract({ address, abi: AMM_TOKEN_GETTERS_ABI, functionName: 'tokenA' })
+    pc.readContract({ address, abi: AMM_TOKEN_GETTERS_ABI, functionName: 'tokenA' }), deadline
   )) as `0x${string}`;
   const tokenB = (await rpcCall(() =>
-    pc.readContract({ address, abi: AMM_TOKEN_GETTERS_ABI, functionName: 'tokenB' })
+    pc.readContract({ address, abi: AMM_TOKEN_GETTERS_ABI, functionName: 'tokenB' }), deadline
   )) as `0x${string}`;
   const result = { tokenA, tokenB };
   tokensCache.set(cacheKey, result);
@@ -75,10 +74,10 @@ async function getPoolTokens(pc: PublicClient, cacheKey: string, address: `0x${s
 }
 
 const vaultTokenCache = new Map<string, `0x${string}`>();
-async function getVaultToken(pc: PublicClient, cacheKey: string, address: `0x${string}`) {
+async function getVaultToken(pc: PublicClient, cacheKey: string, address: `0x${string}`, deadline: number) {
   if (vaultTokenCache.has(cacheKey)) return vaultTokenCache.get(cacheKey)!;
   const token = (await rpcCall(() =>
-    pc.readContract({ address, abi: VAULT_TOKEN_GETTER_ABI, functionName: 'stakingToken' })
+    pc.readContract({ address, abi: VAULT_TOKEN_GETTER_ABI, functionName: 'stakingToken' }), deadline
   )) as `0x${string}`;
   vaultTokenCache.set(cacheKey, token);
   return token;
@@ -105,23 +104,25 @@ async function insertEvents(rows: any[]) {
   if (error) console.error('insert error', error);
 }
 
-const blockTimestampCacheByChain = new Map<string, string>();
-
-async function blockTimestamp(pc: PublicClient, chainKey: string, blockNumber: bigint) {
+// Cached per (chain, blockNumber) — many events land in the same or nearby
+// blocks, so this avoids re-paying the 2.5s pace cost for a block we've
+// already looked up earlier in this same run.
+const blockTimestampCache = new Map<string, string>();
+async function blockTimestamp(pc: PublicClient, chainKey: string, blockNumber: bigint, deadline: number) {
   const key = `${chainKey}:${blockNumber}`;
-  const cached = blockTimestampCacheByChain.get(key);
+  const cached = blockTimestampCache.get(key);
   if (cached) return cached;
-  const block = await rpcCall(() => pc.getBlock({ blockNumber }));
+  const block = await rpcCall(() => pc.getBlock({ blockNumber }), deadline);
   const ts = new Date(Number(block.timestamp) * 1000).toISOString();
-  blockTimestampCacheByChain.set(key, ts);
+  blockTimestampCache.set(key, ts);
   return ts;
 }
 
-async function getLogsPerEvent(pc: PublicClient, address: `0x${string}`, abi: any[], fromBlock: bigint, toBlock: bigint) {
+async function getLogsPerEvent(pc: PublicClient, address: `0x${string}`, abi: any[], fromBlock: bigint, toBlock: bigint, deadline: number) {
   const eventAbis = abi.filter((item) => item.type === 'event');
   const allLogs: any[] = [];
   for (const eventAbi of eventAbis) {
-    const logs = await rpcCall(() => pc.getLogs({ address, event: eventAbi, fromBlock, toBlock }));
+    const logs = await rpcCall(() => pc.getLogs({ address, event: eventAbi, fromBlock, toBlock }), deadline);
     allLogs.push(...(logs as any[]));
   }
   allLogs.sort((a, b) => Number(a.blockNumber - b.blockNumber) || a.logIndex - b.logIndex);
@@ -129,113 +130,132 @@ async function getLogsPerEvent(pc: PublicClient, address: `0x${string}`, abi: an
 }
 
 async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: `0x${string}`, abi: any, pc: PublicClient, runStartTime: number) {
-  const { tokenA, tokenB } = await getPoolTokens(pc, `${chainKey}:${contractKey}`, address);
-  const decA = await getDecimals(pc, tokenA);
-  const decB = await getDecimals(pc, tokenB);
+  const deadline = runStartTime + TIME_BUDGET_MS;
+  const { tokenA, tokenB } = await getPoolTokens(pc, `${chainKey}:${contractKey}`, address, deadline);
+  const decA = await getDecimals(pc, tokenA, deadline);
+  const decB = await getDecimals(pc, tokenB, deadline);
 
   let cursor = await getCursor(chainKey, contractKey);
-  const latest = await rpcCall(() => pc.getBlockNumber());
+  const latest = await rpcCall(() => pc.getBlockNumber(), deadline);
 
-  while (cursor < latest && Date.now() - runStartTime < TIME_BUDGET_MS) {
+  while (cursor < latest && Date.now() < deadline) {
     const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-    const logs = await getLogsPerEvent(pc, address, abi, cursor + 1n, toBlock);
-    const rows = [];
+    try {
+      const logs = await getLogsPerEvent(pc, address, abi, cursor + 1n, toBlock, deadline);
+      const rows = [];
 
-    for (const log of logs as any[]) {
-      const ts = await blockTimestamp(pc, chainKey, log.blockNumber);
-      const base = { chain: chainKey, contract: contractKey, tx_hash: log.transactionHash, block_number: Number(log.blockNumber), block_timestamp: ts, raw: log };
+      for (const log of logs as any[]) {
+        const ts = await blockTimestamp(pc, chainKey, log.blockNumber, deadline);
+        const base = { chain: chainKey, contract: contractKey, tx_hash: log.transactionHash, block_number: Number(log.blockNumber), block_timestamp: ts, raw: log };
 
-      if (log.eventName === 'Swap') {
-        const tokenIn = log.args.tokenIn as `0x${string}`;
-        const inIsA = tokenIn.toLowerCase() === tokenA.toLowerCase();
-        const tokenOut = (log.args.tokenOut ?? (inIsA ? tokenB : tokenA)) as `0x${string}`;
-        const decIn = inIsA ? decA : decB;
-        const decOut = inIsA ? decB : decA;
+        if (log.eventName === 'Swap') {
+          const tokenIn = log.args.tokenIn as `0x${string}`;
+          const inIsA = tokenIn.toLowerCase() === tokenA.toLowerCase();
+          const tokenOut = (log.args.tokenOut ?? (inIsA ? tokenB : tokenA)) as `0x${string}`;
+          const decIn = inIsA ? decA : decB;
+          const decOut = inIsA ? decB : decA;
 
-        rows.push({
-          ...base, event_type: 'swap', wallet: log.args.trader,
-          token_in: tokenIn, token_out: tokenOut,
-          amount_in: formatUnits(log.args.amountIn, decIn),
-          amount_out: formatUnits(log.args.amountOut, decOut),
-          fee_amount: formatUnits((log.args.amountIn * SWAP_FEE_BPS) / 10000n, decIn),
-        });
-      } else if (log.eventName === 'LiquidityAdded') {
-        rows.push({
-          ...base, event_type: 'add_liquidity', wallet: log.args.provider,
-          amount_in: formatUnits(log.args.amountA, decA), amount_out: formatUnits(log.args.amountB, decB),
-        });
-      } else if (log.eventName === 'LiquidityRemoved') {
-        rows.push({
-          ...base, event_type: 'remove_liquidity', wallet: log.args.provider,
-          amount_in: formatUnits(log.args.amountA, decA), amount_out: formatUnits(log.args.amountB, decB),
-        });
+          rows.push({
+            ...base, event_type: 'swap', wallet: log.args.trader,
+            token_in: tokenIn, token_out: tokenOut,
+            amount_in: formatUnits(log.args.amountIn, decIn),
+            amount_out: formatUnits(log.args.amountOut, decOut),
+            fee_amount: formatUnits((log.args.amountIn * SWAP_FEE_BPS) / 10000n, decIn),
+          });
+        } else if (log.eventName === 'LiquidityAdded') {
+          rows.push({
+            ...base, event_type: 'add_liquidity', wallet: log.args.provider,
+            amount_in: formatUnits(log.args.amountA, decA), amount_out: formatUnits(log.args.amountB, decB),
+          });
+        } else if (log.eventName === 'LiquidityRemoved') {
+          rows.push({
+            ...base, event_type: 'remove_liquidity', wallet: log.args.provider,
+            amount_in: formatUnits(log.args.amountA, decA), amount_out: formatUnits(log.args.amountB, decB),
+          });
+        }
       }
+      await insertEvents(rows);
+      await setCursor(chainKey, contractKey, toBlock);
+      cursor = toBlock;
+    } catch (err) {
+      if (err instanceof BudgetExceededError) break;
+      throw err;
     }
-    await insertEvents(rows);
-    await setCursor(chainKey, contractKey, toBlock);
-    cursor = toBlock;
   }
 }
 
 async function scanVault(chainKey: string, address: `0x${string}`, pc: PublicClient, runStartTime: number) {
-  const stakingToken = await getVaultToken(pc, chainKey, address);
-  const dec = await getDecimals(pc, stakingToken);
+  const deadline = runStartTime + TIME_BUDGET_MS;
+  const stakingToken = await getVaultToken(pc, chainKey, address, deadline);
+  const dec = await getDecimals(pc, stakingToken, deadline);
 
   let cursor = await getCursor(chainKey, 'vault');
-  const latest = await rpcCall(() => pc.getBlockNumber());
+  const latest = await rpcCall(() => pc.getBlockNumber(), deadline);
 
-  while (cursor < latest && Date.now() - runStartTime < TIME_BUDGET_MS) {
+  while (cursor < latest && Date.now() < deadline) {
     const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-    const logs = await getLogsPerEvent(pc, address, VAULT_ABI as unknown as any[], cursor + 1n, toBlock);
-    const rows = [];
+    try {
+      const logs = await getLogsPerEvent(pc, address, VAULT_ABI as unknown as any[], cursor + 1n, toBlock, deadline);
+      const rows = [];
 
-    for (const log of logs as any[]) {
-      const ts = await blockTimestamp(pc, chainKey, log.blockNumber);
-      const base = { chain: chainKey, contract: 'vault', tx_hash: log.transactionHash, block_number: Number(log.blockNumber), block_timestamp: ts, raw: log };
-      if (log.eventName === 'Staked') {
-        rows.push({ ...base, event_type: 'stake', wallet: log.args.user, amount_in: formatUnits(log.args.amount, dec) });
-      } else if (log.eventName === 'Withdrawn') {
-        rows.push({ ...base, event_type: 'unstake', wallet: log.args.user, amount_in: formatUnits(log.args.amount, dec) });
+      for (const log of logs as any[]) {
+        const ts = await blockTimestamp(pc, chainKey, log.blockNumber, deadline);
+        const base = { chain: chainKey, contract: 'vault', tx_hash: log.transactionHash, block_number: Number(log.blockNumber), block_timestamp: ts, raw: log };
+        if (log.eventName === 'Staked') {
+          rows.push({ ...base, event_type: 'stake', wallet: log.args.user, amount_in: formatUnits(log.args.amount, dec) });
+        } else if (log.eventName === 'Withdrawn') {
+          rows.push({ ...base, event_type: 'unstake', wallet: log.args.user, amount_in: formatUnits(log.args.amount, dec) });
+        }
       }
+      await insertEvents(rows);
+      await setCursor(chainKey, 'vault', toBlock);
+      cursor = toBlock;
+    } catch (err) {
+      if (err instanceof BudgetExceededError) break;
+      throw err;
     }
-    await insertEvents(rows);
-    await setCursor(chainKey, 'vault', toBlock);
-    cursor = toBlock;
   }
 }
 
 async function scanCctp(chainKey: string, address: `0x${string}`, pc: PublicClient, runStartTime: number) {
+  const deadline = runStartTime + TIME_BUDGET_MS;
   let cursor = await getCursor(chainKey, 'cctp');
-  const latest = await rpcCall(() => pc.getBlockNumber());
+  const latest = await rpcCall(() => pc.getBlockNumber(), deadline);
 
-  while (cursor < latest && Date.now() - runStartTime < TIME_BUDGET_MS) {
+  while (cursor < latest && Date.now() < deadline) {
     const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-    const logs = await getLogsPerEvent(pc, address, CCTP_ABI as unknown as any[], cursor + 1n, toBlock);
-    const rows = [];
+    try {
+      const logs = await getLogsPerEvent(pc, address, CCTP_ABI as unknown as any[], cursor + 1n, toBlock, deadline);
+      const rows = [];
 
-    for (const log of logs as any[]) {
-      const ts = await blockTimestamp(pc, chainKey, log.blockNumber);
-      const decIn = await getDecimals(pc, log.args.burnToken as `0x${string}`);
-      rows.push({
-        chain: chainKey, contract: 'cctp', event_type: 'bridge_burn',
-        wallet: log.args.depositor, token_in: log.args.burnToken,
-        amount_in: formatUnits(log.args.amount, decIn),
-        tx_hash: log.transactionHash, block_number: Number(log.blockNumber),
-        block_timestamp: ts, raw: log,
-      });
+      for (const log of logs as any[]) {
+        const ts = await blockTimestamp(pc, chainKey, log.blockNumber, deadline);
+        const decIn = await getDecimals(pc, log.args.burnToken as `0x${string}`, deadline);
+        rows.push({
+          chain: chainKey, contract: 'cctp', event_type: 'bridge_burn',
+          wallet: log.args.depositor, token_in: log.args.burnToken,
+          amount_in: formatUnits(log.args.amount, decIn),
+          tx_hash: log.transactionHash, block_number: Number(log.blockNumber),
+          block_timestamp: ts, raw: log,
+        });
+      }
+      await insertEvents(rows);
+      await setCursor(chainKey, 'cctp', toBlock);
+      cursor = toBlock;
+    } catch (err) {
+      if (err instanceof BudgetExceededError) break;
+      throw err;
     }
-    await insertEvents(rows);
-    await setCursor(chainKey, 'cctp', toBlock);
-    cursor = toBlock;
   }
 }
 
 export async function runOnce() {
   const runStartTime = Date.now();
+  const deadline = runStartTime + TIME_BUDGET_MS;
   const results: Record<string, string> = {};
 
   for (const [chainKey, cfg] of Object.entries(CHAINS)) {
-    if (Date.now() - runStartTime > TIME_BUDGET_MS) {
+    if (Date.now() > deadline) {
       results[chainKey] = 'skipped: time budget exhausted, will resume next run';
       continue;
     }
