@@ -1,14 +1,19 @@
 import { createPublicClient, http, formatUnits, type PublicClient } from 'viem';
 import { getSupabaseServer } from '@/lib/supabase/server';
 import { CHAINS, BLOCK_CHUNK_SIZE } from './chains';
-import { POOL_ABI, SWAP_ABI, VAULT_ABI, CCTP_ABI, AMM_TOKEN_GETTERS_ABI, ERC20_DECIMALS_ABI, VAULT_TOKEN_GETTER_ABI } from './abis';
+import { POOL_ABI, SWAP_ABI, VAULT_ABI, CCTP_ABI, ERC20_DECIMALS_ABI, VAULT_TOKEN_GETTER_ABI } from './abis';
+import { POOLS, getTokenBySymbol } from '@/lib/swapConfig';
 
 const SWAP_FEE_BPS = 30n;
 const TIME_BUDGET_MS = 40_000; // a bit more headroom below Vercel's limit
 const MIN_REQUEST_INTERVAL_MS = 2500;
 let lastRequestTime = 0;
 
-class BudgetExceededError extends Error {}
+class BudgetExceededError extends Error {
+  constructor() {
+    super('time budget exceeded mid-chunk');
+  }
+}
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -59,17 +64,29 @@ async function getDecimals(pc: PublicClient, token: `0x${string}`, deadline: num
   return d as number;
 }
 
-const tokensCache = new Map<string, { tokenA: `0x${string}`; tokenB: `0x${string}` }>();
-async function getPoolTokens(pc: PublicClient, cacheKey: string, address: `0x${string}`, deadline: number) {
-  if (tokensCache.has(cacheKey)) return tokensCache.get(cacheKey)!;
-  const tokenA = (await rpcCall(() =>
-    pc.readContract({ address, abi: AMM_TOKEN_GETTERS_ABI, functionName: 'tokenA' }), deadline
-  )) as `0x${string}`;
-  const tokenB = (await rpcCall(() =>
-    pc.readContract({ address, abi: AMM_TOKEN_GETTERS_ABI, functionName: 'tokenB' }), deadline
-  )) as `0x${string}`;
-  const result = { tokenA, tokenB };
-  tokensCache.set(cacheKey, result);
+// Static lookup — pool token addresses and decimals never change, and they're
+// already declared in swapConfig.js (POOLS / TOKENS). Resolving this from the
+// pool's on-chain address avoids 4 RPC calls (~10s of paced setup) per AMM
+// contract, per run, that were only ever going to return the same answer.
+const ammTokenInfoCache = new Map<string, { tokenA: `0x${string}`; tokenB: `0x${string}`; decA: number; decB: number }>();
+function getAmmTokenInfo(address: `0x${string}`) {
+  const key = address.toLowerCase();
+  const cached = ammTokenInfoCache.get(key);
+  if (cached) return cached;
+
+  const pool = POOLS.find((p) => p.address.toLowerCase() === key);
+  if (!pool) throw new Error(`No swapConfig POOLS entry for address ${address}`);
+  const tokenA = getTokenBySymbol(pool.tokenA);
+  const tokenB = getTokenBySymbol(pool.tokenB);
+  if (!tokenA || !tokenB) throw new Error(`Bad token symbols for pool ${pool.key}`);
+
+  const result = {
+    tokenA: tokenA.address as `0x${string}`,
+    tokenB: tokenB.address as `0x${string}`,
+    decA: tokenA.decimals,
+    decB: tokenB.decimals,
+  };
+  ammTokenInfoCache.set(key, result);
   return result;
 }
 
@@ -131,9 +148,7 @@ async function getLogsPerEvent(pc: PublicClient, address: `0x${string}`, abi: an
 
 async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: `0x${string}`, abi: any, pc: PublicClient, runStartTime: number) {
   const deadline = runStartTime + TIME_BUDGET_MS;
-  const { tokenA, tokenB } = await getPoolTokens(pc, `${chainKey}:${contractKey}`, address, deadline);
-  const decA = await getDecimals(pc, tokenA, deadline);
-  const decB = await getDecimals(pc, tokenB, deadline);
+  const { tokenA, tokenB, decA, decB } = getAmmTokenInfo(address);
 
   let cursor = await getCursor(chainKey, contractKey);
   const latest = await rpcCall(() => pc.getBlockNumber(), deadline);
