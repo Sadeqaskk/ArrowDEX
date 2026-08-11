@@ -21,7 +21,12 @@ async function pace() {
   lastRequestTime = Date.now();
 }
 
-async function rpcCall<T>(fn: () => Promise<T>, maxRetries = 5): Promise<T> {
+function isLimitError(err: any) {
+  const msg = (err?.message || String(err)).toLowerCase();
+  return msg.includes('rate limit') || msg.includes('exceeds defined limit');
+}
+
+async function rpcCall<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
   let lastErr: any;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     await pace();
@@ -29,9 +34,7 @@ async function rpcCall<T>(fn: () => Promise<T>, maxRetries = 5): Promise<T> {
       return await fn();
     } catch (err: any) {
       lastErr = err;
-      const msg = (err?.message || String(err)).toLowerCase();
-      const isRateLimit = msg.includes('rate limit') || msg.includes('exceeds defined limit');
-      if (!isRateLimit || attempt === maxRetries) throw err;
+      if (!isLimitError(err) || attempt === maxRetries) throw err;
       const delay = 1000 * Math.pow(2, attempt);
       await sleep(delay);
     }
@@ -106,19 +109,37 @@ async function blockTimestamp(pc: PublicClient, blockNumber: bigint) {
   return new Date(Number(block.timestamp) * 1000).toISOString();
 }
 
-// Queries each event in the ABI SEPARATELY (one getLogs call per event name)
-// instead of combining them into one OR'd topic filter — some RPCs (Arc's
-// testnet node included) reject multi-topic0 log queries outright.
+// Fetches logs for one event, and if the RPC rejects the range for ANY
+// limit-related reason, automatically splits the range in half and retries
+// each half recursively — self-adjusts to whatever the RPC's real
+// (undocumented) limit is, instead of us guessing a fixed number.
+async function getLogsForEventAdaptive(
+  pc: PublicClient,
+  address: `0x${string}`,
+  eventAbi: any,
+  fromBlock: bigint,
+  toBlock: bigint
+): Promise<any[]> {
+  try {
+    return (await rpcCall(() =>
+      pc.getLogs({ address, event: eventAbi, fromBlock, toBlock })
+    )) as any[];
+  } catch (err: any) {
+    if (!isLimitError(err) || fromBlock >= toBlock) throw err;
+    const mid = fromBlock + (toBlock - fromBlock) / 2n;
+    const left = await getLogsForEventAdaptive(pc, address, eventAbi, fromBlock, mid);
+    const right = await getLogsForEventAdaptive(pc, address, eventAbi, mid + 1n, toBlock);
+    return [...left, ...right];
+  }
+}
+
 async function getLogsPerEvent(pc: PublicClient, address: `0x${string}`, abi: any[], fromBlock: bigint, toBlock: bigint) {
   const eventAbis = abi.filter((item) => item.type === 'event');
   const allLogs: any[] = [];
   for (const eventAbi of eventAbis) {
-    const logs = await rpcCall(() =>
-      pc.getLogs({ address, event: eventAbi, fromBlock, toBlock })
-    );
-    allLogs.push(...(logs as any[]));
+    const logs = await getLogsForEventAdaptive(pc, address, eventAbi, fromBlock, toBlock);
+    allLogs.push(...logs);
   }
-  // Keep them in block order like a combined query would have returned
   allLogs.sort((a, b) => Number(a.blockNumber - b.blockNumber) || a.logIndex - b.logIndex);
   return allLogs;
 }
