@@ -5,10 +5,12 @@ import { POOL_ABI, SWAP_ABI, VAULT_ABI, CCTP_ABI, AMM_TOKEN_GETTERS_ABI, ERC20_D
 
 const SWAP_FEE_BPS = 30n;
 const TIME_BUDGET_MS = 45_000;
-const MIN_REQUEST_INTERVAL_MS = 400;
-let lastRequestTime = 0;
 
-class BudgetExceededError extends Error {}
+// Arc's RPC limit turned out to be about REQUEST FREQUENCY, not block range
+// size (confirmed: even a single-block query got rejected) — so the fix is
+// slowing down between requests, not splitting ranges into more requests.
+const MIN_REQUEST_INTERVAL_MS = 2500;
+let lastRequestTime = 0;
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -26,9 +28,7 @@ function isLimitError(err: any) {
   return msg.includes('rate limit') || msg.includes('exceeds defined limit');
 }
 
-// Used ONLY for simple, non-log calls (readContract/getBlock/getBlockNumber) —
-// these don't recurse, so a couple of retries here is safe and won't compound.
-async function rpcCall<T>(fn: () => Promise<T>, maxRetries = 2): Promise<T> {
+async function rpcCall<T>(fn: () => Promise<T>, maxRetries = 4): Promise<T> {
   let lastErr: any;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     await pace();
@@ -37,7 +37,7 @@ async function rpcCall<T>(fn: () => Promise<T>, maxRetries = 2): Promise<T> {
     } catch (err: any) {
       lastErr = err;
       if (!isLimitError(err) || attempt === maxRetries) throw err;
-      await sleep(1000 * Math.pow(2, attempt));
+      await sleep(3000 * Math.pow(2, attempt)); // 3s, 6s, 12s, 24s
     }
   }
   throw lastErr;
@@ -110,45 +110,18 @@ async function blockTimestamp(pc: PublicClient, blockNumber: bigint) {
   return new Date(Number(block.timestamp) * 1000).toISOString();
 }
 
-// NO retry/backoff here — a single attempt, then split immediately on a
-// limit error. Retrying before splitting was what caused the timeout: delays
-// from repeated backoff attempts compounded across every recursive split.
-// `deadline` lets this bail out cleanly if we're almost out of time, instead
-// of the whole function getting hard-killed by Vercel mid-request.
-async function getLogsForEventAdaptive(
-  pc: PublicClient,
-  address: `0x${string}`,
-  eventAbi: any,
-  fromBlock: bigint,
-  toBlock: bigint,
-  deadline: number
-): Promise<any[]> {
-  if (Date.now() > deadline) throw new BudgetExceededError();
-  await pace();
-  try {
-    return (await pc.getLogs({ address, event: eventAbi, fromBlock, toBlock })) as any[];
-  } catch (err: any) {
-    if (!isLimitError(err) || fromBlock >= toBlock) throw err;
-    const mid = fromBlock + (toBlock - fromBlock) / 2n;
-    const left = await getLogsForEventAdaptive(pc, address, eventAbi, fromBlock, mid, deadline);
-    const right = await getLogsForEventAdaptive(pc, address, eventAbi, mid + 1n, toBlock, deadline);
-    return [...left, ...right];
-  }
-}
-
-async function getLogsPerEvent(pc: PublicClient, address: `0x${string}`, abi: any[], fromBlock: bigint, toBlock: bigint, deadline: number) {
+async function getLogsPerEvent(pc: PublicClient, address: `0x${string}`, abi: any[], fromBlock: bigint, toBlock: bigint) {
   const eventAbis = abi.filter((item) => item.type === 'event');
   const allLogs: any[] = [];
   for (const eventAbi of eventAbis) {
-    const logs = await getLogsForEventAdaptive(pc, address, eventAbi, fromBlock, toBlock, deadline);
-    allLogs.push(...logs);
+    const logs = await rpcCall(() => pc.getLogs({ address, event: eventAbi, fromBlock, toBlock }));
+    allLogs.push(...(logs as any[]));
   }
   allLogs.sort((a, b) => Number(a.blockNumber - b.blockNumber) || a.logIndex - b.logIndex);
   return allLogs;
 }
 
 async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: `0x${string}`, abi: any, pc: PublicClient, runStartTime: number) {
-  const deadline = runStartTime + TIME_BUDGET_MS;
   const { tokenA, tokenB } = await getPoolTokens(pc, `${chainKey}:${contractKey}`, address);
   const decA = await getDecimals(pc, tokenA);
   const decB = await getDecimals(pc, tokenB);
@@ -156,15 +129,9 @@ async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: 
   let cursor = await getCursor(chainKey, contractKey);
   const latest = await rpcCall(() => pc.getBlockNumber());
 
-  while (cursor < latest && Date.now() < deadline) {
+  while (cursor < latest && Date.now() - runStartTime < TIME_BUDGET_MS) {
     const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-    let logs: any[];
-    try {
-      logs = await getLogsPerEvent(pc, address, abi, cursor + 1n, toBlock, deadline);
-    } catch (err) {
-      if (err instanceof BudgetExceededError) break;
-      throw err;
-    }
+    const logs = await getLogsPerEvent(pc, address, abi, cursor + 1n, toBlock);
     const rows = [];
 
     for (const log of logs as any[]) {
@@ -204,22 +171,15 @@ async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: 
 }
 
 async function scanVault(chainKey: string, address: `0x${string}`, pc: PublicClient, runStartTime: number) {
-  const deadline = runStartTime + TIME_BUDGET_MS;
   const stakingToken = await getVaultToken(pc, chainKey, address);
   const dec = await getDecimals(pc, stakingToken);
 
   let cursor = await getCursor(chainKey, 'vault');
   const latest = await rpcCall(() => pc.getBlockNumber());
 
-  while (cursor < latest && Date.now() < deadline) {
+  while (cursor < latest && Date.now() - runStartTime < TIME_BUDGET_MS) {
     const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-    let logs: any[];
-    try {
-      logs = await getLogsPerEvent(pc, address, VAULT_ABI as unknown as any[], cursor + 1n, toBlock, deadline);
-    } catch (err) {
-      if (err instanceof BudgetExceededError) break;
-      throw err;
-    }
+    const logs = await getLogsPerEvent(pc, address, VAULT_ABI as unknown as any[], cursor + 1n, toBlock);
     const rows = [];
 
     for (const log of logs as any[]) {
@@ -238,19 +198,12 @@ async function scanVault(chainKey: string, address: `0x${string}`, pc: PublicCli
 }
 
 async function scanCctp(chainKey: string, address: `0x${string}`, pc: PublicClient, runStartTime: number) {
-  const deadline = runStartTime + TIME_BUDGET_MS;
   let cursor = await getCursor(chainKey, 'cctp');
   const latest = await rpcCall(() => pc.getBlockNumber());
 
-  while (cursor < latest && Date.now() < deadline) {
+  while (cursor < latest && Date.now() - runStartTime < TIME_BUDGET_MS) {
     const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-    let logs: any[];
-    try {
-      logs = await getLogsPerEvent(pc, address, CCTP_ABI as unknown as any[], cursor + 1n, toBlock, deadline);
-    } catch (err) {
-      if (err instanceof BudgetExceededError) break;
-      throw err;
-    }
+    const logs = await getLogsPerEvent(pc, address, CCTP_ABI as unknown as any[], cursor + 1n, toBlock);
     const rows = [];
 
     for (const log of logs as any[]) {
