@@ -276,14 +276,36 @@ export async function runOnce() {
     }
     const pc = rpcClient(chainKey as keyof typeof CHAINS);
     try {
-      if ('pool' in cfg.contracts) await scanAmm(chainKey, 'pool', cfg.contracts.pool as `0x${string}`, POOL_ABI, pc, runStartTime);
-      if ('swap' in cfg.contracts) await scanAmm(chainKey, 'swap', cfg.contracts.swap as `0x${string}`, SWAP_ABI, pc, runStartTime);
-      if ('vault' in cfg.contracts) await scanVault(chainKey, cfg.contracts.vault as `0x${string}`, pc, runStartTime);
-      if ('cctp' in cfg.contracts) await scanCctp(chainKey, cfg.contracts.cctp as `0x${string}`, pc, runStartTime);
-      results[chainKey] = 'ok';
+      // Re-check before EVERY contract, not just once per chain — a chain with
+      // several contracts (pool/swap/vault/cctp) can run out of budget between
+      // them, not just mid-chunk within one. Each scan*()'s own setup call
+      // (getBlockNumber/getVaultToken/etc.) happens before its chunk loop and
+      // isn't wrapped in that loop's try/catch, so skip the call entirely once
+      // time's up rather than let it throw on the way in.
+      if ('pool' in cfg.contracts && Date.now() < deadline) {
+        await scanAmm(chainKey, 'pool', cfg.contracts.pool as `0x${string}`, POOL_ABI, pc, runStartTime);
+      }
+      if ('swap' in cfg.contracts && Date.now() < deadline) {
+        await scanAmm(chainKey, 'swap', cfg.contracts.swap as `0x${string}`, SWAP_ABI, pc, runStartTime);
+      }
+      if ('vault' in cfg.contracts && Date.now() < deadline) {
+        await scanVault(chainKey, cfg.contracts.vault as `0x${string}`, pc, runStartTime);
+      }
+      if ('cctp' in cfg.contracts && Date.now() < deadline) {
+        await scanCctp(chainKey, cfg.contracts.cctp as `0x${string}`, pc, runStartTime);
+      }
+      results[chainKey] = Date.now() < deadline ? 'ok' : 'ok: partial, time budget exhausted mid-chain, will resume next run';
     } catch (err: any) {
-      console.error(`[${chainKey}] scan error:`, err.message);
-      results[chainKey] = `error: ${err.message}`;
+      // A BudgetExceededError here means a scan*() setup call (getBlockNumber,
+      // getVaultToken, getDecimals) fired just as the deadline passed, before
+      // that function's own chunk loop had a chance to catch it. The cursor is
+      // untouched in that case — this is a clean, expected stop, not a failure.
+      if (err instanceof BudgetExceededError) {
+        results[chainKey] = 'ok: partial, time budget exhausted mid-chain, will resume next run';
+      } else {
+        console.error(`[${chainKey}] scan error:`, err.message);
+        results[chainKey] = `error: ${err.message}`;
+      }
     }
   }
   return results;
