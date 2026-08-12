@@ -25,6 +25,23 @@ export const NAV_ITEMS = [
       </svg>
     ),
   },
+  
+  
+  
+  {
+    href: '/chart',
+    label: 'Chart',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <path d="M4 19V5M4 19h16M8 15l3-4 3 3 4-6" />
+        <rect x="7" y="10" width="1.6" height="5" fill="currentColor" stroke="none" />
+        <rect x="12.5" y="7" width="1.6" height="8" fill="currentColor" stroke="none" />
+        <rect x="16.5" y="4" width="1.6" height="11" fill="currentColor" stroke="none" />
+      </svg>
+    ),
+  },
+  
+  
   {
     href: '/bridge',
     label: 'Bridge',
