@@ -314,12 +314,24 @@ function buildContractJobs(chainKey: string, cfg: (typeof CHAINS)[keyof typeof C
   return jobs;
 }
 
+const CHAIN_KEYS = Object.keys(CHAINS);
+
 export async function runOnce() {
   const runStartTime = Date.now();
   const deadline = runStartTime + TIME_BUDGET_MS;
   const results: Record<string, string> = {};
 
-  for (const [chainKey, cfg] of Object.entries(CHAINS)) {
+  // Same starvation problem as with contracts within a chain, one level up:
+  // deadline is shared across the WHOLE run, and arc alone can (and does)
+  // consume all of it every time, leaving eth_sepolia/base_sepolia at 0
+  // attempts indefinitely. Rotate which chain goes first too, using the same
+  // rotation table under a reserved key that can't collide with a real chain
+  // name (chain keys are plain identifiers, never start with "__").
+  const chainOffset = (await getRotationOffset('__chains__')) % CHAIN_KEYS.length;
+  const rotatedChainKeys = CHAIN_KEYS.slice(chainOffset).concat(CHAIN_KEYS.slice(0, chainOffset));
+
+  for (const chainKey of rotatedChainKeys) {
+    const cfg = CHAINS[chainKey as keyof typeof CHAINS];
     if (Date.now() > deadline) {
       results[chainKey] = 'skipped: time budget exhausted, will resume next run';
       continue;
@@ -362,5 +374,13 @@ export async function runOnce() {
       await setRotationOffset(chainKey, (offset + 1) % jobs.length);
     }
   }
+
+  // Same unconditional-advance logic as the contract rotation: whichever
+  // chain led this run, it will NOT lead next run, regardless of whether it
+  // finished, partially finished, or errored.
+  if (CHAIN_KEYS.length > 1) {
+    await setRotationOffset('__chains__', (chainOffset + 1) % CHAIN_KEYS.length);
+  }
+
   return results;
 }
