@@ -327,8 +327,20 @@ export async function runOnce() {
   // attempts indefinitely. Rotate which chain goes first too, using the same
   // rotation table under a reserved key that can't collide with a real chain
   // name (chain keys are plain identifiers, never start with "__").
+  //
+  // IMPORTANT: this write happens NOW, before any scanning starts — not
+  // after the loop finishes. A run that's already using its full time budget
+  // is exactly the kind of run that risks hitting Vercel's hard function
+  // timeout, which kills execution with no error and no chance to run
+  // cleanup code afterward. Committing to "who leads next run" up front
+  // means the fairness bookkeeping survives even if this run gets killed
+  // mid-flight — it can never be silently skipped the way an end-of-run
+  // write can.
   const chainOffset = (await getRotationOffset('__chains__')) % CHAIN_KEYS.length;
   const rotatedChainKeys = CHAIN_KEYS.slice(chainOffset).concat(CHAIN_KEYS.slice(0, chainOffset));
+  if (CHAIN_KEYS.length > 1) {
+    await setRotationOffset('__chains__', (chainOffset + 1) % CHAIN_KEYS.length);
+  }
 
   for (const chainKey of rotatedChainKeys) {
     const cfg = CHAINS[chainKey as keyof typeof CHAINS];
@@ -340,6 +352,11 @@ export async function runOnce() {
     const jobs = buildContractJobs(chainKey, cfg, pc, runStartTime);
     const offset = (await getRotationOffset(chainKey)) % jobs.length;
     const rotatedJobs = jobs.slice(offset).concat(jobs.slice(0, offset));
+    // Same reasoning as the chain-level write above: commit this before
+    // scanning, not after, so it can't be lost to a mid-run timeout.
+    if (jobs.length > 1) {
+      await setRotationOffset(chainKey, (offset + 1) % jobs.length);
+    }
 
     try {
       // Re-check before EVERY contract, not just once per chain — a chain with
@@ -365,21 +382,6 @@ export async function runOnce() {
         results[chainKey] = `error: ${err.message}`;
       }
     }
-
-    // Advance the rotation regardless of outcome — even if this run's leader
-    // ate the whole budget again (or errored), it will NOT lead again next
-    // run. This is what actually guarantees fairness over time, rather than
-    // hoping the budget happens to spread out on its own.
-    if (jobs.length > 1) {
-      await setRotationOffset(chainKey, (offset + 1) % jobs.length);
-    }
-  }
-
-  // Same unconditional-advance logic as the contract rotation: whichever
-  // chain led this run, it will NOT lead next run, regardless of whether it
-  // finished, partially finished, or errored.
-  if (CHAIN_KEYS.length > 1) {
-    await setRotationOffset('__chains__', (chainOffset + 1) % CHAIN_KEYS.length);
   }
 
   return results;
