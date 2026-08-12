@@ -74,7 +74,10 @@ function getAmmTokenInfo(address: `0x${string}`) {
   const cached = ammTokenInfoCache.get(key);
   if (cached) return cached;
 
-  const pool = POOLS.find((p) => p.address.toLowerCase() === key);
+  // swapConfig.js is plain JS with no type declarations, so give this
+  // callback param an explicit type rather than relying on inference across
+  // the JS/TS boundary — avoids a noImplicitAny error on `p`.
+  const pool = POOLS.find((p: { address: string; tokenA: string; tokenB: string; key: string }) => p.address.toLowerCase() === key);
   if (!pool) throw new Error(`No swapConfig POOLS entry for address ${address}`);
   const tokenA = getTokenBySymbol(pool.tokenA);
   const tokenB = getTokenBySymbol(pool.tokenB);
@@ -110,6 +113,25 @@ async function getCursor(chain: string, contract: string): Promise<bigint> {
 async function setCursor(chain: string, contract: string, block: bigint) {
   await getSupabaseServer().from('indexer_cursor').upsert({
     chain, contract, last_block: block.toString(), updated_at: new Date().toISOString(),
+  });
+}
+
+// Which contract should be scanned FIRST for this chain this run. Without
+// this, a chain with a big backlog on one contract (e.g. arc/pool) can eat
+// the entire time budget every single run, starving its siblings (swap,
+// vault, cctp) indefinitely — they'd never make progress. Advancing this by
+// one after every run, win or lose, guarantees each contract eventually
+// leads and gets first crack at the budget.
+async function getRotationOffset(chain: string): Promise<number> {
+  const { data } = await getSupabaseServer()
+    .from('indexer_rotation').select('next_index')
+    .eq('chain', chain).maybeSingle();
+  return data ? data.next_index : 0;
+}
+
+async function setRotationOffset(chain: string, index: number) {
+  await getSupabaseServer().from('indexer_rotation').upsert({
+    chain, next_index: index, updated_at: new Date().toISOString(),
   });
 }
 
@@ -264,6 +286,34 @@ async function scanCctp(chainKey: string, address: `0x${string}`, pc: PublicClie
   }
 }
 
+type ContractJob = { key: string; run: () => Promise<void> };
+
+// Canonical contract list for a chain, in a fixed base order. Rotation below
+// just changes which one of these goes FIRST each run — it never changes
+// this underlying order, so rotation stays predictable and easy to reason
+/// about (offset 0 = pool,swap,vault,cctp; offset 1 = swap,vault,cctp,pool; …).
+function buildContractJobs(chainKey: string, cfg: (typeof CHAINS)[keyof typeof CHAINS], pc: PublicClient, runStartTime: number): ContractJob[] {
+  // cfg is a union of per-chain shapes (arc has pool/swap/vault/cctp; the
+  // Sepolia chains only have cctp). TS can't narrow that union through a
+  // function parameter the way it could inline, so cast once here to a plain
+  // record — property access below is a runtime existence check either way.
+  const contracts = cfg.contracts as Record<string, string>;
+  const jobs: ContractJob[] = [];
+  if (contracts.pool) {
+    jobs.push({ key: 'pool', run: () => scanAmm(chainKey, 'pool', contracts.pool as `0x${string}`, POOL_ABI, pc, runStartTime) });
+  }
+  if (contracts.swap) {
+    jobs.push({ key: 'swap', run: () => scanAmm(chainKey, 'swap', contracts.swap as `0x${string}`, SWAP_ABI, pc, runStartTime) });
+  }
+  if (contracts.vault) {
+    jobs.push({ key: 'vault', run: () => scanVault(chainKey, contracts.vault as `0x${string}`, pc, runStartTime) });
+  }
+  if (contracts.cctp) {
+    jobs.push({ key: 'cctp', run: () => scanCctp(chainKey, contracts.cctp as `0x${string}`, pc, runStartTime) });
+  }
+  return jobs;
+}
+
 export async function runOnce() {
   const runStartTime = Date.now();
   const deadline = runStartTime + TIME_BUDGET_MS;
@@ -275,6 +325,10 @@ export async function runOnce() {
       continue;
     }
     const pc = rpcClient(chainKey as keyof typeof CHAINS);
+    const jobs = buildContractJobs(chainKey, cfg, pc, runStartTime);
+    const offset = (await getRotationOffset(chainKey)) % jobs.length;
+    const rotatedJobs = jobs.slice(offset).concat(jobs.slice(0, offset));
+
     try {
       // Re-check before EVERY contract, not just once per chain — a chain with
       // several contracts (pool/swap/vault/cctp) can run out of budget between
@@ -282,17 +336,9 @@ export async function runOnce() {
       // (getBlockNumber/getVaultToken/etc.) happens before its chunk loop and
       // isn't wrapped in that loop's try/catch, so skip the call entirely once
       // time's up rather than let it throw on the way in.
-      if ('pool' in cfg.contracts && Date.now() < deadline) {
-        await scanAmm(chainKey, 'pool', cfg.contracts.pool as `0x${string}`, POOL_ABI, pc, runStartTime);
-      }
-      if ('swap' in cfg.contracts && Date.now() < deadline) {
-        await scanAmm(chainKey, 'swap', cfg.contracts.swap as `0x${string}`, SWAP_ABI, pc, runStartTime);
-      }
-      if ('vault' in cfg.contracts && Date.now() < deadline) {
-        await scanVault(chainKey, cfg.contracts.vault as `0x${string}`, pc, runStartTime);
-      }
-      if ('cctp' in cfg.contracts && Date.now() < deadline) {
-        await scanCctp(chainKey, cfg.contracts.cctp as `0x${string}`, pc, runStartTime);
+      for (const job of rotatedJobs) {
+        if (Date.now() >= deadline) break;
+        await job.run();
       }
       results[chainKey] = Date.now() < deadline ? 'ok' : 'ok: partial, time budget exhausted mid-chain, will resume next run';
     } catch (err: any) {
@@ -306,6 +352,14 @@ export async function runOnce() {
         console.error(`[${chainKey}] scan error:`, err.message);
         results[chainKey] = `error: ${err.message}`;
       }
+    }
+
+    // Advance the rotation regardless of outcome — even if this run's leader
+    // ate the whole budget again (or errored), it will NOT lead again next
+    // run. This is what actually guarantees fairness over time, rather than
+    // hoping the budget happens to spread out on its own.
+    if (jobs.length > 1) {
+      await setRotationOffset(chainKey, (offset + 1) % jobs.length);
     }
   }
   return results;
