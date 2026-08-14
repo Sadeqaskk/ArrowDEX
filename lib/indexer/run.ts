@@ -5,7 +5,7 @@ import { POOL_ABI, SWAP_ABI, VAULT_ABI, CCTP_ABI, ERC20_DECIMALS_ABI, VAULT_TOKE
 import { POOLS, getTokenBySymbol } from '@/lib/swapConfig';
 
 const SWAP_FEE_BPS = 30n;
-const TIME_BUDGET_MS = 40_000; // a bit more headroom below Vercel's limit
+const TIME_BUDGET_MS = 40_000;
 const MIN_REQUEST_INTERVAL_MS = 2500;
 let lastRequestTime = 0;
 
@@ -64,19 +64,12 @@ async function getDecimals(pc: PublicClient, token: `0x${string}`, deadline: num
   return d as number;
 }
 
-// Static lookup — pool token addresses and decimals never change, and they're
-// already declared in swapConfig.js (POOLS / TOKENS). Resolving this from the
-// pool's on-chain address avoids 4 RPC calls (~10s of paced setup) per AMM
-// contract, per run, that were only ever going to return the same answer.
 const ammTokenInfoCache = new Map<string, { tokenA: `0x${string}`; tokenB: `0x${string}`; decA: number; decB: number }>();
 function getAmmTokenInfo(address: `0x${string}`) {
   const key = address.toLowerCase();
   const cached = ammTokenInfoCache.get(key);
   if (cached) return cached;
 
-  // swapConfig.js is plain JS with no type declarations, so give this
-  // callback param an explicit type rather than relying on inference across
-  // the JS/TS boundary — avoids a noImplicitAny error on `p`.
   const pool = POOLS.find((p: { address: string; tokenA: string; tokenB: string; key: string }) => p.address.toLowerCase() === key);
   if (!pool) throw new Error(`No swapConfig POOLS entry for address ${address}`);
   const tokenA = getTokenBySymbol(pool.tokenA);
@@ -116,12 +109,6 @@ async function setCursor(chain: string, contract: string, block: bigint) {
   });
 }
 
-// Which contract should be scanned FIRST for this chain this run. Without
-// this, a chain with a big backlog on one contract (e.g. arc/pool) can eat
-// the entire time budget every single run, starving its siblings (swap,
-// vault, cctp) indefinitely — they'd never make progress. Advancing this by
-// one after every run, win or lose, guarantees each contract eventually
-// leads and gets first crack at the budget.
 async function getRotationOffset(chain: string): Promise<number> {
   const { data } = await getSupabaseServer()
     .from('indexer_rotation').select('next_index')
@@ -143,9 +130,6 @@ async function insertEvents(rows: any[]) {
   if (error) console.error('insert error', error);
 }
 
-// Cached per (chain, blockNumber) — many events land in the same or nearby
-// blocks, so this avoids re-paying the 2.5s pace cost for a block we've
-// already looked up earlier in this same run.
 const blockTimestampCache = new Map<string, string>();
 async function blockTimestamp(pc: PublicClient, chainKey: string, blockNumber: bigint, deadline: number) {
   const key = `${chainKey}:${blockNumber}`;
@@ -168,8 +152,10 @@ async function getLogsPerEvent(pc: PublicClient, address: `0x${string}`, abi: an
   return allLogs;
 }
 
-async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: `0x${string}`, abi: any, pc: PublicClient, runStartTime: number) {
-  const deadline = runStartTime + TIME_BUDGET_MS;
+// All scan*() functions now take `deadline` directly (a chain's own dedicated
+// slice) instead of deriving one internally from a run-wide runStartTime —
+// that's what let one chain silently consume the whole run's budget before.
+async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: `0x${string}`, abi: any, pc: PublicClient, deadline: number) {
   const { tokenA, tokenB, decA, decB } = getAmmTokenInfo(address);
 
   let cursor = await getCursor(chainKey, contractKey);
@@ -221,8 +207,7 @@ async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: 
   }
 }
 
-async function scanVault(chainKey: string, address: `0x${string}`, pc: PublicClient, runStartTime: number) {
-  const deadline = runStartTime + TIME_BUDGET_MS;
+async function scanVault(chainKey: string, address: `0x${string}`, pc: PublicClient, deadline: number) {
   const stakingToken = await getVaultToken(pc, chainKey, address, deadline);
   const dec = await getDecimals(pc, stakingToken, deadline);
 
@@ -254,8 +239,7 @@ async function scanVault(chainKey: string, address: `0x${string}`, pc: PublicCli
   }
 }
 
-async function scanCctp(chainKey: string, address: `0x${string}`, pc: PublicClient, runStartTime: number) {
-  const deadline = runStartTime + TIME_BUDGET_MS;
+async function scanCctp(chainKey: string, address: `0x${string}`, pc: PublicClient, deadline: number) {
   let cursor = await getCursor(chainKey, 'cctp');
   const latest = await rpcCall(() => pc.getBlockNumber(), deadline);
 
@@ -288,54 +272,37 @@ async function scanCctp(chainKey: string, address: `0x${string}`, pc: PublicClie
 
 type ContractJob = { key: string; run: () => Promise<void> };
 
-// Canonical contract list for a chain, in a fixed base order. Rotation below
-// just changes which one of these goes FIRST each run — it never changes
-// this underlying order, so rotation stays predictable and easy to reason
-/// about (offset 0 = pool,swap,vault,cctp; offset 1 = swap,vault,cctp,pool; …).
-function buildContractJobs(chainKey: string, cfg: (typeof CHAINS)[keyof typeof CHAINS], pc: PublicClient, runStartTime: number): ContractJob[] {
-  // cfg is a union of per-chain shapes (arc has pool/swap/vault/cctp; the
-  // Sepolia chains only have cctp). TS can't narrow that union through a
-  // function parameter the way it could inline, so cast once here to a plain
-  // record — property access below is a runtime existence check either way.
+function buildContractJobs(chainKey: string, cfg: (typeof CHAINS)[keyof typeof CHAINS], pc: PublicClient, deadline: number): ContractJob[] {
   const contracts = cfg.contracts as Record<string, string>;
   const jobs: ContractJob[] = [];
   if (contracts.pool) {
-    jobs.push({ key: 'pool', run: () => scanAmm(chainKey, 'pool', contracts.pool as `0x${string}`, POOL_ABI, pc, runStartTime) });
+    jobs.push({ key: 'pool', run: () => scanAmm(chainKey, 'pool', contracts.pool as `0x${string}`, POOL_ABI, pc, deadline) });
   }
   if (contracts.swap) {
-    jobs.push({ key: 'swap', run: () => scanAmm(chainKey, 'swap', contracts.swap as `0x${string}`, SWAP_ABI, pc, runStartTime) });
+    jobs.push({ key: 'swap', run: () => scanAmm(chainKey, 'swap', contracts.swap as `0x${string}`, SWAP_ABI, pc, deadline) });
   }
   if (contracts.vault) {
-    jobs.push({ key: 'vault', run: () => scanVault(chainKey, contracts.vault as `0x${string}`, pc, runStartTime) });
+    jobs.push({ key: 'vault', run: () => scanVault(chainKey, contracts.vault as `0x${string}`, pc, deadline) });
   }
   if (contracts.cctp) {
-    jobs.push({ key: 'cctp', run: () => scanCctp(chainKey, contracts.cctp as `0x${string}`, pc, runStartTime) });
+    jobs.push({ key: 'cctp', run: () => scanCctp(chainKey, contracts.cctp as `0x${string}`, pc, deadline) });
   }
   return jobs;
 }
 
 const CHAIN_KEYS = Object.keys(CHAINS);
+// Each chain gets its OWN dedicated slice of the total budget, so one chain
+// (even a single-contract one like eth_sepolia/base_sepolia) can never eat
+// the whole run and starve the others — this was happening even with
+// chain-level rotation, since rotation only changes WHO goes first, not how
+// much of the shared clock a leading chain is allowed to consume.
+const PER_CHAIN_BUDGET_MS = Math.floor(TIME_BUDGET_MS / CHAIN_KEYS.length);
 
 export async function runOnce() {
   const runStartTime = Date.now();
-  const deadline = runStartTime + TIME_BUDGET_MS;
+  const overallDeadline = runStartTime + TIME_BUDGET_MS;
   const results: Record<string, string> = {};
 
-  // Same starvation problem as with contracts within a chain, one level up:
-  // deadline is shared across the WHOLE run, and arc alone can (and does)
-  // consume all of it every time, leaving eth_sepolia/base_sepolia at 0
-  // attempts indefinitely. Rotate which chain goes first too, using the same
-  // rotation table under a reserved key that can't collide with a real chain
-  // name (chain keys are plain identifiers, never start with "__").
-  //
-  // IMPORTANT: this write happens NOW, before any scanning starts — not
-  // after the loop finishes. A run that's already using its full time budget
-  // is exactly the kind of run that risks hitting Vercel's hard function
-  // timeout, which kills execution with no error and no chance to run
-  // cleanup code afterward. Committing to "who leads next run" up front
-  // means the fairness bookkeeping survives even if this run gets killed
-  // mid-flight — it can never be silently skipped the way an end-of-run
-  // write can.
   const chainOffset = (await getRotationOffset('__chains__')) % CHAIN_KEYS.length;
   const rotatedChainKeys = CHAIN_KEYS.slice(chainOffset).concat(CHAIN_KEYS.slice(0, chainOffset));
   if (CHAIN_KEYS.length > 1) {
@@ -344,39 +311,31 @@ export async function runOnce() {
 
   for (const chainKey of rotatedChainKeys) {
     const cfg = CHAINS[chainKey as keyof typeof CHAINS];
-    if (Date.now() > deadline) {
-      results[chainKey] = 'skipped: time budget exhausted, will resume next run';
+    if (Date.now() > overallDeadline) {
+      results[chainKey] = 'skipped: overall time budget exhausted, will resume next run';
       continue;
     }
+    // Cap this chain's slice at whatever's actually left, so a chain late in
+    // rotation never gets a deadline past the overall run limit.
+    const chainDeadline = Math.min(Date.now() + PER_CHAIN_BUDGET_MS, overallDeadline);
+
     const pc = rpcClient(chainKey as keyof typeof CHAINS);
-    const jobs = buildContractJobs(chainKey, cfg, pc, runStartTime);
+    const jobs = buildContractJobs(chainKey, cfg, pc, chainDeadline);
     const offset = (await getRotationOffset(chainKey)) % jobs.length;
     const rotatedJobs = jobs.slice(offset).concat(jobs.slice(0, offset));
-    // Same reasoning as the chain-level write above: commit this before
-    // scanning, not after, so it can't be lost to a mid-run timeout.
     if (jobs.length > 1) {
       await setRotationOffset(chainKey, (offset + 1) % jobs.length);
     }
 
     try {
-      // Re-check before EVERY contract, not just once per chain — a chain with
-      // several contracts (pool/swap/vault/cctp) can run out of budget between
-      // them, not just mid-chunk within one. Each scan*()'s own setup call
-      // (getBlockNumber/getVaultToken/etc.) happens before its chunk loop and
-      // isn't wrapped in that loop's try/catch, so skip the call entirely once
-      // time's up rather than let it throw on the way in.
       for (const job of rotatedJobs) {
-        if (Date.now() >= deadline) break;
+        if (Date.now() >= chainDeadline) break;
         await job.run();
       }
-      results[chainKey] = Date.now() < deadline ? 'ok' : 'ok: partial, time budget exhausted mid-chain, will resume next run';
+      results[chainKey] = Date.now() < chainDeadline ? 'ok' : 'ok: partial, chain time slice exhausted, will resume next run';
     } catch (err: any) {
-      // A BudgetExceededError here means a scan*() setup call (getBlockNumber,
-      // getVaultToken, getDecimals) fired just as the deadline passed, before
-      // that function's own chunk loop had a chance to catch it. The cursor is
-      // untouched in that case — this is a clean, expected stop, not a failure.
       if (err instanceof BudgetExceededError) {
-        results[chainKey] = 'ok: partial, time budget exhausted mid-chain, will resume next run';
+        results[chainKey] = 'ok: partial, chain time slice exhausted, will resume next run';
       } else {
         console.error(`[${chainKey}] scan error:`, err.message);
         results[chainKey] = `error: ${err.message}`;
