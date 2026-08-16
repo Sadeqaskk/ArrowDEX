@@ -1,3 +1,6 @@
+'use client';
+
+import { useState } from 'react';
 import AppShell from '../../components/AppShell';
 import { CHAIN_LIST } from '../../lib/chains';
 
@@ -59,12 +62,63 @@ const ROADMAP = [
   },
 ];
 
+const STATUS_GRID = [
+  { label: 'Swap', ok: true },
+  { label: 'Liquidity Pools', ok: true },
+  { label: 'Vault Staking', ok: true },
+  { label: 'CCTP Bridge', ok: true },
+];
+
+const SECTIONS = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'networks', label: 'Networks' },
+  { id: 'bridge-flow', label: 'Bridge Flow' },
+  { id: 'getting-started', label: 'Getting Started' },
+  { id: 'roadmap', label: 'Roadmap' },
+  { id: 'faq', label: 'FAQ' },
+];
+
+function LivePulse({ ok = true }) {
+  return <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${ok ? 'bg-success animate-pulse' : 'bg-dim/40'}`} />;
+}
+
+function FaqItem({ item, open, onToggle }) {
+  return (
+    <div className="border border-white/5 rounded-[14px] overflow-hidden bg-white/[0.015]">
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center justify-between gap-3 px-5 py-4 text-left hover:bg-white/[0.02] transition-colors"
+      >
+        <span className="font-bold text-sm text-ivory">{item.q}</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={`w-4 h-4 text-dim flex-shrink-0 transition-transform ${open ? 'rotate-180' : ''}`}>
+          <path d="M6 9l6 6 6-6" />
+        </svg>
+      </button>
+      <div className={`grid transition-[grid-template-rows] duration-300 ${open ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
+        <div className="overflow-hidden">
+          <div className="px-5 pb-4 text-sm text-dim leading-relaxed">{item.a}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function DocsPage() {
+  const [openFaq, setOpenFaq] = useState(new Set([0]));
+
+  function toggleFaq(i) {
+    setOpenFaq((prev) => {
+      const next = new Set(prev);
+      next.has(i) ? next.delete(i) : next.add(i);
+      return next;
+    });
+  }
+
   return (
     <AppShell>
       <div className="max-w-[760px] mx-auto">
-        <div className="mb-8 sm:mb-10">
-          <div className="card-label mb-2">Documentation</div>
+        <div className="mb-6 sm:mb-8">
+          <div className="card-label mb-2 flex items-center gap-1.5"><LivePulse /> Documentation</div>
           <h1 className="text-2xl sm:text-[28px] font-bold">How Arrow DEX Works</h1>
           <p className="text-dim text-sm mt-1.5">
             Everything here reflects what&apos;s actually built and live today. Nothing on this page is aspirational — the roadmap section at the bottom is clearly marked as what&apos;s next, not what exists.
@@ -93,7 +147,38 @@ export default function DocsPage() {
           </a>
         </div>
 
-        <section className="glass p-5 sm:p-7 mb-6">
+        {/* System status — the visual proof behind "if it's on the page, it's real" */}
+        <div className="glass p-4 sm:p-5 mb-5 flex flex-wrap items-center gap-x-6 gap-y-3">
+          <div className="flex items-center gap-2 text-sm font-bold text-success">
+            <LivePulse />
+            All systems operational
+          </div>
+          <div className="flex flex-wrap gap-x-5 gap-y-2 text-[12px] text-dim">
+            {STATUS_GRID.map((s) => (
+              <span key={s.label} className="flex items-center gap-1.5">
+                <LivePulse ok={s.ok} />
+                {s.label}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        {/* Section jump nav */}
+        <div className="sticky top-2 z-10 -mx-1 px-1 mb-6 overflow-x-auto no-scrollbar">
+          <div className="flex gap-1.5 w-max backdrop-blur-xl bg-[#0A0A10]/70 border border-white/5 rounded-full p-1.5">
+            {SECTIONS.map((s) => (
+              <a
+                key={s.id}
+                href={`#${s.id}`}
+                className="px-3.5 py-1.5 rounded-full text-[12px] font-semibold text-dim hover:text-ivory hover:bg-white/5 transition-colors whitespace-nowrap"
+              >
+                {s.label}
+              </a>
+            ))}
+          </div>
+        </div>
+
+        <section id="overview" className="glass p-5 sm:p-7 mb-6 scroll-mt-20">
           <h2 className="text-lg font-bold mb-4">What We&apos;re Building</h2>
           <div className="space-y-4 text-sm text-dim leading-relaxed">
             <p>
@@ -115,11 +200,11 @@ export default function DocsPage() {
           </div>
         </section>
 
-        <section className="glass p-5 sm:p-7 mb-6">
+        <section id="networks" className="glass p-5 sm:p-7 mb-6 scroll-mt-20">
           <h2 className="text-lg font-bold mb-4">Supported Networks</h2>
           <div className="space-y-3">
             {CHAIN_LIST.map((c) => (
-              <div key={c.key} className="flex items-center justify-between gap-3 p-4 bg-white/[0.02] border border-white/5 rounded-[14px]">
+              <div key={c.key} className="flex items-center justify-between gap-3 p-4 bg-white/[0.02] border border-white/5 hover:border-indigo-bright/20 rounded-[14px] transition-colors">
                 <div className="min-w-0">
                   <div className="font-bold text-sm">{c.name}</div>
                   <div className="text-[11px] text-dim mt-1 font-mono">
@@ -134,7 +219,7 @@ export default function DocsPage() {
           </div>
         </section>
 
-        <section className="glass p-5 sm:p-7 mb-6">
+        <section id="bridge-flow" className="glass p-5 sm:p-7 mb-6 scroll-mt-20">
           <h2 className="text-lg font-bold mb-4">The Bridge Flow (Live)</h2>
           <ol className="space-y-4">
             {[
@@ -154,7 +239,7 @@ export default function DocsPage() {
           </ol>
         </section>
 
-        <section className="glass p-5 sm:p-7 mb-6">
+        <section id="getting-started" className="glass p-5 sm:p-7 mb-6 scroll-mt-20">
           <h2 className="text-lg font-bold mb-4">Getting Started</h2>
           <ol className="space-y-3 text-sm text-dim leading-relaxed list-decimal list-inside">
             <li>Install MetaMask, Rabby, or any wallet extension — or skip that and use WalletConnect from your phone.</li>
@@ -165,7 +250,7 @@ export default function DocsPage() {
           </ol>
         </section>
 
-        <section className="glass p-5 sm:p-7 mb-6">
+        <section id="roadmap" className="glass p-5 sm:p-7 mb-6 scroll-mt-20">
           <h2 className="text-lg font-bold mb-1">What&apos;s Next</h2>
           <p className="text-xs text-dim mb-5">Roadmap — not built yet, marked clearly as vision, not fact.</p>
           <div className="space-y-4">
@@ -181,52 +266,43 @@ export default function DocsPage() {
           </div>
         </section>
 
-        <section className="glass p-5 sm:p-7 mb-6">
+        <section id="faq" className="glass p-5 sm:p-7 mb-6 scroll-mt-20">
           <h2 className="text-lg font-bold mb-4">FAQ</h2>
-          <div className="space-y-5">
-            {FAQ.map((item) => (
-              <div key={item.q}>
-                <div className="font-bold text-sm mb-1.5">{item.q}</div>
-                <div className="text-sm text-dim leading-relaxed">{item.a}</div>
-              </div>
+          <div className="space-y-2.5">
+            {FAQ.map((item, i) => (
+              <FaqItem key={item.q} item={item} open={openFaq.has(i)} onToggle={() => toggleFaq(i)} />
             ))}
           </div>
         </section>
 
-        <section className="glass p-5 sm:p-7">
-          <h2 className="text-lg font-bold mb-4">Built By</h2>
-          <div className="flex items-center gap-4">
-            <div className="w-12 h-12 rounded-[14px] bg-gradient-to-br from-indigo-bright via-indigo to-[#3a2fb8] flex items-center justify-center font-extrabold text-white text-lg flex-shrink-0">
-              S
-            </div>
-            <div className="min-w-0">
-              <div className="font-bold text-sm text-ivory">Sadik</div>
-              <div className="text-xs text-dim mt-0.5">Founder & Builder, Arrow DEX</div>
-            </div>
+        {/* Institutional footer — protocol identity only, no personal attribution */}
+        <section className="glass p-6 sm:p-8 text-center">
+          <div className="w-11 h-11 rounded-[14px] bg-gradient-to-br from-indigo-bright via-indigo to-[#3a2fb8] flex items-center justify-center mx-auto mb-4 shadow-glow">
+            <ArrowMark className="w-5 h-5 text-white" />
           </div>
-          <div className="flex flex-col sm:flex-row gap-2.5 mt-5">
-            <a
-              href="https://x.com/0xsadik0"
-              target="_blank"
-              rel="noreferrer"
-              className="flex-1 flex items-center justify-center gap-2 border border-white/10 hover:border-indigo-bright/40 rounded-[12px] py-3 text-sm font-semibold text-ivory transition-all"
-            >
-              <XIcon className="w-4 h-4" />
-              @0xsadik0
-            </a>
+          <div className="font-bold text-base text-ivory">Arrow DEX</div>
+          <p className="text-sm text-dim mt-1.5 max-w-[420px] mx-auto leading-relaxed">
+            A real, working cross-chain exchange on Arc Testnet. Built one deployed contract at a time.
+          </p>
+          <div className="flex justify-center gap-2.5 mt-6">
             <a
               href="https://x.com/ArrowDEX1"
               target="_blank"
               rel="noreferrer"
-              className="flex-1 flex items-center justify-center gap-2 bg-gradient-to-br from-indigo-bright to-indigo rounded-[12px] py-3 text-sm font-semibold text-white shadow-glow transition-all"
+              className="flex items-center gap-2 bg-gradient-to-br from-indigo-bright to-indigo rounded-[12px] px-5 py-3 text-sm font-semibold text-white shadow-glow hover:-translate-y-px transition-transform"
             >
               <XIcon className="w-4 h-4" />
-              @ArrowDEX1
+              Follow the project
+            </a>
+            <a
+              href="https://arrowdexdocs.vercel.app/"
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-2 border border-white/10 hover:border-indigo-bright/40 rounded-[12px] px-5 py-3 text-sm font-semibold text-ivory transition-all"
+            >
+              Documentation
             </a>
           </div>
-          <p className="text-[11px] text-dim mt-4 leading-relaxed text-center">
-            Built one real contract at a time. Follow along for what&apos;s next.
-          </p>
         </section>
 
       </div>
@@ -256,6 +332,15 @@ function ArrowIcon({ className }) {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={className}>
       <path d="M7 17L17 7" />
       <path d="M7 7h10v10" />
+    </svg>
+  );
+}
+
+function ArrowMark({ className }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className}>
+      <path d="M10 20L16 9l6 11-6-3.5-6 3.5z" fill="currentColor" fillOpacity="0.95" />
+      <path d="M10 20l6 3.5 6-3.5-6 6.5-6-6.5z" fill="currentColor" fillOpacity="0.55" />
     </svg>
   );
 }

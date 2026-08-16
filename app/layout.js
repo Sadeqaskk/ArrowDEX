@@ -1,5 +1,6 @@
 import '../styles/globals.css';
 import { WalletProvider } from '../lib/WalletContext';
+import { NotificationProvider } from '../components/NotificationProvider';
 
 export const metadata = {
   title: 'Arrow DEX — Cross-Chain Exchange',
@@ -9,8 +10,10 @@ export const metadata = {
 export default function RootLayout({ children }) {
   return (
     <html lang="en">
-      <body>
-        <WalletProvider>{children}</WalletProvider>
+     <body>
+        <WalletProvider>
+          <NotificationProvider>{children}</NotificationProvider>
+        </WalletProvider>
       </body>
     </html>
   );

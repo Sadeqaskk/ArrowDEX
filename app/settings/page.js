@@ -5,41 +5,56 @@ import AppShell from '../../components/AppShell';
 import { useWallet } from '../../lib/WalletContext';
 import { CHAINS, CHAIN_LIST } from '../../lib/chains';
 import { ensureChain } from '../../lib/cctp';
+import { getPreferences, savePreferences, useNotify } from '../../components/NotificationProvider';
 
-const STORAGE_KEY = 'arrow-dex-preferences';
+const PREVIEW_EVENTS = [
+  { type: 'swap', title: 'Swapped 250 USDC → 231.4 EURC', message: 'Filled via ArrowSwap Engine · 0.06% price impact' },
+  { type: 'addLiquidity', title: 'Added Liquidity', message: '120 WUSDC + 84.2 ARROW deposited' },
+  { type: 'stake', title: 'Staked 84.2 ARROW-LP', message: 'Now earning 12.4% APR' },
+  { type: 'claim', title: 'Claimed 6.18 ARROW', message: 'Rewards sent to your wallet' },
+];
 
 export default function SettingsPage() {
   const { address, isConnected, connect, disconnect, chainId, network, currentChain } = useWallet();
+  const notify = useNotify();
 
   const [notifications, setNotifications] = useState(true);
   const [defaultSlippage, setDefaultSlippage] = useState(0.5);
   const [switching, setSwitching] = useState(null);
   const [switchError, setSwitchError] = useState(null);
+  const [permission, setPermission] = useState('unsupported');
+  const [requesting, setRequesting] = useState(false);
 
   useEffect(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-      if (typeof saved.notifications === 'boolean') setNotifications(saved.notifications);
-      if (typeof saved.defaultSlippage === 'number') setDefaultSlippage(saved.defaultSlippage);
-    } catch {
-      // ignore malformed/missing storage
-    }
+    const prefs = getPreferences();
+    setNotifications(prefs.notifications);
+    setDefaultSlippage(prefs.defaultSlippage);
+    setPermission(typeof window !== 'undefined' && typeof Notification !== 'undefined' ? Notification.permission : 'unsupported');
   }, []);
-
-  function savePrefs(next) {
-    const merged = { notifications, defaultSlippage, ...next };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
-  }
 
   function toggleNotifications() {
     const next = !notifications;
     setNotifications(next);
-    savePrefs({ notifications: next });
+    savePreferences({ notifications: next });
   }
 
   function updateSlippage(value) {
     setDefaultSlippage(value);
-    savePrefs({ defaultSlippage: value });
+    savePreferences({ defaultSlippage: value });
+  }
+
+  async function requestSystemNotifications() {
+    if (typeof Notification === 'undefined') return;
+    setRequesting(true);
+    try {
+      const result = await Notification.requestPermission();
+      setPermission(result);
+      if (result === 'granted') {
+        notify({ type: 'claim', title: 'System notifications on', message: "You'll get alerts here even when this tab isn't focused." });
+      }
+    } finally {
+      setRequesting(false);
+    }
   }
 
   async function handleSwitchNetwork(chain) {
@@ -54,6 +69,13 @@ export default function SettingsPage() {
     }
   }
 
+  const permissionMeta = {
+    granted: { label: 'Enabled', tone: 'text-success', dot: 'bg-success' },
+    denied: { label: 'Blocked by browser', tone: 'text-danger', dot: 'bg-danger' },
+    default: { label: 'Not enabled', tone: 'text-dim', dot: 'bg-dim/40' },
+    unsupported: { label: 'Not supported in this browser', tone: 'text-dim', dot: 'bg-dim/40' },
+  }[permission];
+
   return (
     <AppShell>
       <div className="max-w-[680px] mx-auto">
@@ -63,7 +85,7 @@ export default function SettingsPage() {
           <p className="text-dim text-sm mt-1.5">Manage your wallet connection, network, and preferences.</p>
         </div>
 
-        <div className="glass p-5 sm:p-7 mb-5">
+        <div className="glass p-5 sm:p-7 mb-5 hover:border-indigo-bright/20 border border-transparent transition-colors">
           <div className="card-label mb-4">Wallet</div>
           {isConnected ? (
             <>
@@ -86,7 +108,7 @@ export default function SettingsPage() {
               <div className="flex items-center justify-between py-3">
                 <span className="text-sm text-dim">Status</span>
                 <span className="flex items-center gap-2 text-success text-sm font-medium">
-                  <span className="w-1.5 h-1.5 rounded-full bg-success shadow-[0_0_8px_currentColor]" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-success shadow-[0_0_8px_currentColor] animate-pulse" />
                   Connected
                 </span>
               </div>
@@ -102,7 +124,7 @@ export default function SettingsPage() {
               <p className="text-dim text-sm mb-4">No wallet connected.</p>
               <button
                 onClick={connect}
-                className="bg-gradient-to-br from-indigo-bright to-indigo text-white font-semibold text-sm px-6 py-3 rounded-[12px] shadow-glow"
+                className="bg-gradient-to-br from-indigo-bright to-indigo text-white font-semibold text-sm px-6 py-3 rounded-[12px] shadow-glow hover:-translate-y-px transition-transform"
               >
                 Connect Wallet
               </button>
@@ -110,7 +132,7 @@ export default function SettingsPage() {
           )}
         </div>
 
-        <div className="glass p-5 sm:p-7 mb-5">
+        <div className="glass p-5 sm:p-7 mb-5 hover:border-indigo-bright/20 border border-transparent transition-colors">
           <div className="card-label mb-1">Networks</div>
           <p className="text-xs text-dim mb-4">Switch your wallet&apos;s active network directly from here.</p>
           <div className="space-y-2.5">
@@ -139,13 +161,15 @@ export default function SettingsPage() {
           {switchError && <div className="mt-3 text-sm text-danger">{switchError}</div>}
         </div>
 
-        <div className="glass p-5 sm:p-7">
-          <div className="card-label mb-4">Preferences</div>
+        {/* Notifications — now a real, working system */}
+        <div className="glass p-5 sm:p-7 mb-5 hover:border-indigo-bright/20 border border-transparent transition-colors">
+          <div className="card-label mb-1">Notifications</div>
+          <p className="text-xs text-dim mb-4">Get alerted the moment a swap, bridge, wrap, liquidity, or staking transaction confirms.</p>
 
           <div className="flex items-center justify-between gap-3 py-3 border-b border-white/5">
             <div className="min-w-0">
-              <div className="text-sm font-medium">Transaction notifications</div>
-              <div className="text-xs text-dim mt-0.5">Browser alerts for swap, bridge, and stake events</div>
+              <div className="text-sm font-medium">In-app alerts</div>
+              <div className="text-xs text-dim mt-0.5">Premium banner notifications inside ArrowDEX</div>
             </div>
             <button
               onClick={toggleNotifications}
@@ -154,6 +178,52 @@ export default function SettingsPage() {
               <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${notifications ? 'left-[22px]' : 'left-0.5'}`} />
             </button>
           </div>
+
+          <div className="flex items-center justify-between gap-3 py-3 border-b border-white/5">
+            <div className="min-w-0">
+              <div className="text-sm font-medium">System notifications</div>
+              <div className="text-xs text-dim mt-0.5 flex items-center gap-1.5">
+                <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${permissionMeta.dot}`} />
+                <span className={permissionMeta.tone}>{permissionMeta.label}</span>
+                <span className="text-dim">· fires even when this tab is in the background</span>
+              </div>
+            </div>
+            {permission !== 'granted' && permission !== 'unsupported' && (
+              <button
+                onClick={requestSystemNotifications}
+                disabled={requesting || permission === 'denied'}
+                title={permission === 'denied' ? 'Blocked — re-enable from your browser\'s site settings' : undefined}
+                className="text-xs font-semibold text-indigo-bright disabled:text-dim disabled:opacity-50 border border-indigo-bright/30 disabled:border-white/10 px-4 py-2 rounded-full transition-colors flex-shrink-0"
+              >
+                {requesting ? 'Requesting…' : 'Enable'}
+              </button>
+            )}
+          </div>
+
+          <div className="py-4">
+            <div className="text-sm font-medium mb-1">Preview the style</div>
+            <div className="text-xs text-dim mb-3">See exactly how a confirmed transaction will notify you.</div>
+            <div className="flex flex-wrap gap-2">
+              {PREVIEW_EVENTS.map((e) => (
+                <button
+                  key={e.type}
+                  onClick={() => notify({ ...e, txHash: '0x' + '1a2b3c4d5e6f'.repeat(5) })}
+                  className="text-xs font-semibold text-ivory bg-white/[0.03] hover:bg-white/[0.06] border border-white/5 hover:border-indigo-bright/30 px-3.5 py-2 rounded-full transition-colors"
+                >
+                  {e.title.split(' ').slice(0, 2).join(' ')}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <p className="text-[11px] text-dim leading-relaxed pt-1">
+            In-app alerts show a banner while you're using ArrowDEX. System notifications additionally reach you through your
+            device's real notification center when the tab isn't focused — same as a native app.
+          </p>
+        </div>
+
+        <div className="glass p-5 sm:p-7 hover:border-indigo-bright/20 border border-transparent transition-colors">
+          <div className="card-label mb-4">Preferences</div>
 
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 py-3">
             <div>

@@ -1,15 +1,19 @@
-import TradingChart from '@/components/TradingChart';
+'use client';
+
+import AppShell from '../../components/AppShell';
+import TradingChart from '../../components/TradingChart';
 
 export default function ChartPage() {
   return (
-    <main className="min-h-screen bg-black px-4 py-8 md:px-8">
+    <AppShell>
       <div className="max-w-6xl mx-auto space-y-6">
-        <div className="space-y-1">
-          <h1 className="font-sans text-2xl font-bold text-ivory">Markets</h1>
-          <p className="font-sans text-sm text-dim">Live on-chain price action for ArrowDEX pools.</p>
+        <div>
+          <div className="card-label mb-2">Markets</div>
+          <h1 className="text-[28px] font-bold">Live Markets</h1>
+          <p className="text-dim text-sm mt-1.5">Real-time on-chain price action for ArrowDEX pools.</p>
         </div>
         <TradingChart />
       </div>
-    </main>
+    </AppShell>
   );
 }
