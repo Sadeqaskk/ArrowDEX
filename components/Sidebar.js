@@ -39,6 +39,12 @@ export const NAV_GROUPS = [
           <path d="M11 8h2M8 11v2M16 8h2" />
         </svg>
       ) },
+            { href: '/factory', label: 'Factory', icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+          <path d="M3 21V9l6 4V9l6 4V9l6 4v8H3z" />
+          <path d="M7 21v-4M12 21v-4M17 21v-4" />
+        </svg>
+      ) },
       { href: '/vaults', label: 'Vaults', icon: (
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
           <path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z" />

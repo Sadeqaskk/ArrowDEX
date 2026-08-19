@@ -4,15 +4,18 @@
 //
 // Public, read-only "live activity" view of ArrowFactory: shows every pool
 // it has created, auto-refreshing, styled entirely with Tailwind utility
-// classes against the indigo/laser/violetglow theme. Nobody can create
-// pools from this page (createPool is owner-only, by design) — this is
-// purely a window into what the factory has done and is doing.
+// classes against the indigo/laser/violetglow theme. Below the feed, an
+// owner-gated admin panel appears ONLY when the connected wallet matches
+// ArrowFactory.owner() — everyone else just sees the plain activity feed.
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import AppShell from '../../components/AppShell';
+import { useWallet } from '../../lib/WalletContext';
 import {
   getFactoryPools,
   getFactoryPoolCount,
+  getFactoryOwner,
+  createFactoryPool,
   ARROW_FACTORY_ADDRESS,
   ARROW_POOL_IMPLEMENTATION_ADDRESS,
   ARROW_ROUTER_ADDRESS,
@@ -42,6 +45,8 @@ function timeAgo(ts) {
 }
 
 export default function FactoryPage() {
+  const { address, isConnected, connect } = useWallet();
+
   const [pools, setPools] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -49,6 +54,17 @@ export default function FactoryPage() {
   const [newestHighlight, setNewestHighlight] = useState(null);
   const prevCountRef = useRef(0);
   const refreshingRef = useRef(false);
+
+  // ── Owner admin state ──────────────────────────────────────────────
+  const [isOwner, setIsOwner] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [tokenAInput, setTokenAInput] = useState('');
+  const [tokenBInput, setTokenBInput] = useState('');
+  const [nameInput, setNameInput] = useState('');
+  const [symbolInput, setSymbolInput] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [createStatus, setCreateStatus] = useState('');
+  const [createError, setCreateError] = useState(null);
 
   const refresh = useCallback(async (opts = {}) => {
     const silent = !!opts.silent;
@@ -81,6 +97,42 @@ export default function FactoryPage() {
     const id = setInterval(() => refresh({ silent: true }), AUTO_REFRESH_MS);
     return () => clearInterval(id);
   }, [refresh]);
+
+  // Check ownership whenever the connected wallet changes — this is what
+  // gates the entire admin panel below.
+  useEffect(() => {
+    if (!isConnected || !address) { setIsOwner(false); return; }
+    getFactoryOwner()
+      .then((owner) => setIsOwner(owner.toLowerCase() === address.toLowerCase()))
+      .catch(() => setIsOwner(false));
+  }, [isConnected, address]);
+
+  async function handleCreatePool() {
+    setCreating(true);
+    setCreateError(null);
+    try {
+      await createFactoryPool({
+        account: address,
+        tokenA: tokenAInput,
+        tokenB: tokenBInput,
+        name: nameInput,
+        symbol: symbolInput,
+        onStatus: setCreateStatus,
+      });
+      setTokenAInput('');
+      setTokenBInput('');
+      setNameInput('');
+      setSymbolInput('');
+      setCreateOpen(false);
+      refresh();
+    } catch (err) {
+      console.error(err);
+      setCreateError(err.shortMessage || err.message || 'Failed to create pool.');
+    } finally {
+      setCreating(false);
+      setCreateStatus('');
+    }
+  }
 
   return (
     <AppShell>
@@ -206,8 +258,84 @@ export default function FactoryPage() {
 
         <p className="mt-4 text-[11.5px] text-dim leading-relaxed text-center">
           Pool creation is restricted to the Arrow DEX team. This page shows what ArrowFactory
-          has deployed — it doesn't let you create a pool yourself.
+          has deployed.
         </p>
+
+        {/* Owner-only admin panel — invisible to everyone except the
+            connected wallet that matches ArrowFactory.owner(). */}
+        {!isConnected && (
+          <button
+            onClick={connect}
+            className="w-full mt-6 bg-white/[0.02] border border-white/10 text-dim text-xs font-semibold py-3 rounded-card hover:border-indigo-bright/30 hover:text-ivory transition-colors"
+          >
+            Connect wallet to check for owner tools
+          </button>
+        )}
+
+        {isOwner && (
+          <div className="mt-6">
+            <button
+              onClick={() => setCreateOpen((v) => !v)}
+              className="w-full flex items-center justify-center gap-2 bg-gradient-to-br from-indigo/15 to-indigo/[0.04] border border-indigo-bright/30 rounded-card px-4 py-3 text-indigo-bright text-[13px] font-semibold hover:border-indigo-bright/50 transition-colors"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-indigo-bright shadow-[0_0_8px_#8B7FFF]" />
+              Owner tools — Create Pool
+              <svg
+                viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+                className={`w-3.5 h-3.5 transition-transform ${createOpen ? 'rotate-180' : ''}`}
+              >
+                <path d="M6 9l6 6 6-6" />
+              </svg>
+            </button>
+
+            {createOpen && (
+              <div className="flex flex-col gap-3 bg-panel border border-white/10 border-t-0 rounded-b-card px-5 py-5">
+                <input
+                  className="bg-black/30 border border-white/10 rounded-[10px] px-3 py-2.5 text-ivory font-mono text-[13px] outline-none placeholder:text-dim/50 focus:border-indigo-bright/40"
+                  placeholder="Token A address (0x...)"
+                  value={tokenAInput}
+                  onChange={(e) => setTokenAInput(e.target.value)}
+                />
+                <input
+                  className="bg-black/30 border border-white/10 rounded-[10px] px-3 py-2.5 text-ivory font-mono text-[13px] outline-none placeholder:text-dim/50 focus:border-indigo-bright/40"
+                  placeholder="Token B address (0x...)"
+                  value={tokenBInput}
+                  onChange={(e) => setTokenBInput(e.target.value)}
+                />
+                <input
+                  className="bg-black/30 border border-white/10 rounded-[10px] px-3 py-2.5 text-ivory font-mono text-[13px] outline-none placeholder:text-dim/50 focus:border-indigo-bright/40"
+                  placeholder="LP token name (e.g. Arrow LP FOO-BAR)"
+                  value={nameInput}
+                  onChange={(e) => setNameInput(e.target.value)}
+                />
+                <input
+                  className="bg-black/30 border border-white/10 rounded-[10px] px-3 py-2.5 text-ivory font-mono text-[13px] outline-none placeholder:text-dim/50 focus:border-indigo-bright/40"
+                  placeholder="LP token symbol (e.g. ALP-FOO-BAR)"
+                  value={symbolInput}
+                  onChange={(e) => setSymbolInput(e.target.value)}
+                />
+
+                {createError && (
+                  <div className="text-[12px] text-danger bg-danger/10 border border-danger/25 rounded-[10px] px-3 py-2.5">
+                    {createError}
+                  </div>
+                )}
+
+                <button
+                  onClick={handleCreatePool}
+                  disabled={creating || !tokenAInput || !tokenBInput || !nameInput || !symbolInput}
+                  className="w-full bg-gradient-to-br from-indigo-bright to-indigo text-white font-bold text-[14px] py-3.5 rounded-[12px] shadow-glow hover:-translate-y-px transition-transform disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
+                >
+                  {creating ? (createStatus || 'Creating…') : 'Create Pool'}
+                </button>
+
+                <p className="text-[11px] text-dim text-center">
+                  This auto-registers with ArrowRouter in the same transaction.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </AppShell>
   );
