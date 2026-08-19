@@ -1,6 +1,7 @@
 import '../styles/globals.css';
 import { WalletProvider } from '../lib/WalletContext';
 import { NotificationProvider } from '../components/NotificationProvider';
+import { DesktopModeProvider } from '../components/DesktopModeContext';
 
 export const metadata = {
   title: 'Arrow DEX — Cross-Chain Exchange',
@@ -10,10 +11,12 @@ export const metadata = {
 export default function RootLayout({ children }) {
   return (
     <html lang="en">
-     <body>
-        <WalletProvider>
-          <NotificationProvider>{children}</NotificationProvider>
-        </WalletProvider>
+      <body>
+        <DesktopModeProvider>
+          <WalletProvider>
+            <NotificationProvider>{children}</NotificationProvider>
+          </WalletProvider>
+        </DesktopModeProvider>
       </body>
     </html>
   );

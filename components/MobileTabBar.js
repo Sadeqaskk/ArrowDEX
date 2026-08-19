@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useWallet } from '../lib/WalletContext';
 import { NAV_GROUPS, NAV_ITEMS } from './Sidebar';
+import DesktopModeToggle from './DesktopModeToggle';
 
 // The 4 primary destinations shown as always-visible tabs — chosen to match
 // the four things the Docs page calls out as "real and live today"
@@ -158,6 +159,9 @@ export default function MobileTabBar() {
               </svg>
               Settings
             </Link>
+            <div onClick={() => setMoreOpen(false)}>
+              <DesktopModeToggle variant="button" />
+            </div>
           </div>
         </div>
       )}

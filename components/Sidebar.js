@@ -104,32 +104,37 @@ function NavIcon({ href, label, icon, active }) {
   );
 }
 
-export default function Sidebar() {
+export default function Sidebar({ forceVisible = false }) {
   const pathname = usePathname();
 
   return (
-    <aside className="hidden md:flex sticky top-0 h-screen border-r border-white/5 flex-col items-center py-8 w-[88px] bg-gradient-to-b from-transparent via-transparent to-white/[0.01]">
+    <aside
+      className={`${forceVisible ? 'flex' : 'hidden md:flex'} sticky top-0 h-screen border-r border-white/5 flex-col items-center py-6 w-[88px] bg-gradient-to-b from-transparent via-transparent to-white/[0.01] overflow-y-auto overscroll-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden`}
+    >
       <Link
         href="/"
         aria-label="Arrow DEX home"
-        className="group w-[42px] h-[42px] rounded-[13px] mb-10 flex items-center justify-center bg-gradient-to-br from-indigo-bright via-indigo to-[#3a2fb8] shadow-[0_0_0_1px_rgba(255,255,255,0.08),0_8px_28px_-6px_rgba(108,99,255,0.7)] overflow-hidden transition-transform hover:scale-105 hover:shadow-[0_0_0_1px_rgba(255,255,255,0.12),0_10px_34px_-4px_rgba(108,99,255,0.85)]"
+        className="group w-[42px] h-[42px] rounded-[13px] mb-8 flex-shrink-0 flex items-center justify-center bg-gradient-to-br from-indigo-bright via-indigo to-[#3a2fb8] shadow-[0_0_0_1px_rgba(255,255,255,0.08),0_8px_28px_-6px_rgba(108,99,255,0.7)] overflow-hidden transition-transform hover:scale-105 hover:shadow-[0_0_0_1px_rgba(255,255,255,0.12),0_10px_34px_-4px_rgba(108,99,255,0.85)]"
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src="/fonts/tokens/arrow.png" alt="Arrow DEX" className="transition-transform group-hover:scale-110" />
       </Link>
 
       {NAV_GROUPS.map((group, gi) => (
-        <div key={gi} className="flex flex-col items-center">
+        <div key={gi} className="flex flex-col items-center flex-shrink-0">
           {group.items.map((item) => (
             <NavIcon key={item.href} {...item} active={pathname === item.href} />
           ))}
           {gi < NAV_GROUPS.length - 1 && (
-            <span className="w-6 h-px bg-white/5 my-2.5" />
+            <span className="w-6 h-px bg-white/5 my-2.5 flex-shrink-0" />
           )}
         </div>
       ))}
 
-      <div className="flex-1" />
+      {/* min-h-4 instead of flex-1 alone — guarantees breathing room above
+          Settings even when the nav list is tall enough to need scrolling,
+          instead of Settings getting crushed flush against the last icon */}
+      <div className="flex-1 min-h-4" />
 
       <NavIcon
         href="/settings"
@@ -142,6 +147,7 @@ export default function Sidebar() {
           </svg>
         }
       />
+      <div className="h-2 flex-shrink-0" />
     </aside>
   );
 }

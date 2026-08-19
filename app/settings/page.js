@@ -6,6 +6,7 @@ import { useWallet } from '../../lib/WalletContext';
 import { CHAINS, CHAIN_LIST } from '../../lib/chains';
 import { ensureChain } from '../../lib/cctp';
 import { getPreferences, savePreferences, useNotify } from '../../components/NotificationProvider';
+import DesktopModeToggle from '../../components/DesktopModeToggle';
 
 const PREVIEW_EVENTS = [
   { type: 'swap', title: 'Swapped 250 USDC → 231.4 EURC', message: 'Filled via ArrowSwap Engine · 0.06% price impact' },
@@ -224,6 +225,8 @@ export default function SettingsPage() {
 
         <div className="glass p-5 sm:p-7 hover:border-indigo-bright/20 border border-transparent transition-colors">
           <div className="card-label mb-4">Preferences</div>
+
+          <DesktopModeToggle />
 
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 py-3">
             <div>
