@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { getSupabaseServer } from '@/lib/supabase/server';
 
+export const dynamic = 'force-dynamic';
+
 const CATEGORY_EVENT_TYPES: Record<string, string[]> = {
   overall: ['swap', 'bridge_burn', 'add_liquidity', 'stake'],
   swap_bridge: ['swap', 'bridge_burn'],
