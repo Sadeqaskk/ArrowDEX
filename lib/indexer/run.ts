@@ -152,18 +152,23 @@ async function getLogsPerEvent(pc: PublicClient, address: `0x${string}`, abi: an
   return allLogs;
 }
 
-// All scan*() functions now take `deadline` directly (a chain's own dedicated
-// slice) instead of deriving one internally from a run-wide runStartTime —
-// that's what let one chain silently consume the whole run's budget before.
-async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: `0x${string}`, abi: any, pc: PublicClient, deadline: number) {
-  const { tokenA, tokenB, decA, decB } = getAmmTokenInfo(address);
+// `latest` is now passed in (fetched once per chain, shared across all jobs)
+// instead of each job independently re-fetching it — that was burning a full
+// paced RPC call per job for no reason, on top of the actual chunk-scanning
+// calls that matter.
+//
+// The ENTIRE body is wrapped in try/catch for BudgetExceededError, not just
+// the chunk loop — a job that runs out of time before even its first useful
+// call (e.g. inside getAmmTokenInfo/getVaultToken/getDecimals) now fails
+// quietly and returns, instead of throwing past the loop and aborting every
+// job scheduled after it in that chain's rotation for the run.
+async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: `0x${string}`, abi: any, pc: PublicClient, latest: bigint, deadline: number) {
+  try {
+    const { tokenA, tokenB, decA, decB } = getAmmTokenInfo(address);
+    let cursor = await getCursor(chainKey, contractKey);
 
-  let cursor = await getCursor(chainKey, contractKey);
-  const latest = await rpcCall(() => pc.getBlockNumber(), deadline);
-
-  while (cursor < latest && Date.now() < deadline) {
-    const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-    try {
+    while (cursor < latest && Date.now() < deadline) {
+      const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
       const logs = await getLogsPerEvent(pc, address, abi, cursor + 1n, toBlock, deadline);
       const rows = [];
 
@@ -200,23 +205,21 @@ async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: 
       await insertEvents(rows);
       await setCursor(chainKey, contractKey, toBlock);
       cursor = toBlock;
-    } catch (err) {
-      if (err instanceof BudgetExceededError) break;
-      throw err;
     }
+  } catch (err) {
+    if (err instanceof BudgetExceededError) return;
+    throw err;
   }
 }
 
-async function scanVault(chainKey: string, address: `0x${string}`, pc: PublicClient, deadline: number) {
-  const stakingToken = await getVaultToken(pc, chainKey, address, deadline);
-  const dec = await getDecimals(pc, stakingToken, deadline);
+async function scanVault(chainKey: string, address: `0x${string}`, pc: PublicClient, latest: bigint, deadline: number) {
+  try {
+    const stakingToken = await getVaultToken(pc, chainKey, address, deadline);
+    const dec = await getDecimals(pc, stakingToken, deadline);
+    let cursor = await getCursor(chainKey, 'vault');
 
-  let cursor = await getCursor(chainKey, 'vault');
-  const latest = await rpcCall(() => pc.getBlockNumber(), deadline);
-
-  while (cursor < latest && Date.now() < deadline) {
-    const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-    try {
+    while (cursor < latest && Date.now() < deadline) {
+      const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
       const logs = await getLogsPerEvent(pc, address, VAULT_ABI as unknown as any[], cursor + 1n, toBlock, deadline);
       const rows = [];
 
@@ -232,20 +235,19 @@ async function scanVault(chainKey: string, address: `0x${string}`, pc: PublicCli
       await insertEvents(rows);
       await setCursor(chainKey, 'vault', toBlock);
       cursor = toBlock;
-    } catch (err) {
-      if (err instanceof BudgetExceededError) break;
-      throw err;
     }
+  } catch (err) {
+    if (err instanceof BudgetExceededError) return;
+    throw err;
   }
 }
 
-async function scanCctp(chainKey: string, address: `0x${string}`, pc: PublicClient, deadline: number) {
-  let cursor = await getCursor(chainKey, 'cctp');
-  const latest = await rpcCall(() => pc.getBlockNumber(), deadline);
+async function scanCctp(chainKey: string, address: `0x${string}`, pc: PublicClient, latest: bigint, deadline: number) {
+  try {
+    let cursor = await getCursor(chainKey, 'cctp');
 
-  while (cursor < latest && Date.now() < deadline) {
-    const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-    try {
+    while (cursor < latest && Date.now() < deadline) {
+      const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
       const logs = await getLogsPerEvent(pc, address, CCTP_ABI as unknown as any[], cursor + 1n, toBlock, deadline);
       const rows = [];
 
@@ -263,39 +265,36 @@ async function scanCctp(chainKey: string, address: `0x${string}`, pc: PublicClie
       await insertEvents(rows);
       await setCursor(chainKey, 'cctp', toBlock);
       cursor = toBlock;
-    } catch (err) {
-      if (err instanceof BudgetExceededError) break;
-      throw err;
     }
+  } catch (err) {
+    if (err instanceof BudgetExceededError) return;
+    throw err;
   }
 }
 
-type ContractJob = { key: string; run: () => Promise<void> };
+// A job takes `latest` (shared, fetched once per chain) and its own deadline
+// at call time, so each job gets a genuinely independent, fairly-sized slice.
+type ContractJob = { key: string; run: (latest: bigint, deadline: number) => Promise<void> };
 
-function buildContractJobs(chainKey: string, cfg: (typeof CHAINS)[keyof typeof CHAINS], pc: PublicClient, deadline: number): ContractJob[] {
+function buildContractJobs(chainKey: string, cfg: (typeof CHAINS)[keyof typeof CHAINS], pc: PublicClient): ContractJob[] {
   const contracts = cfg.contracts as Record<string, string>;
   const jobs: ContractJob[] = [];
   if (contracts.pool) {
-    jobs.push({ key: 'pool', run: () => scanAmm(chainKey, 'pool', contracts.pool as `0x${string}`, POOL_ABI, pc, deadline) });
+    jobs.push({ key: 'pool', run: (latest, deadline) => scanAmm(chainKey, 'pool', contracts.pool as `0x${string}`, POOL_ABI, pc, latest, deadline) });
   }
   if (contracts.swap) {
-    jobs.push({ key: 'swap', run: () => scanAmm(chainKey, 'swap', contracts.swap as `0x${string}`, SWAP_ABI, pc, deadline) });
+    jobs.push({ key: 'swap', run: (latest, deadline) => scanAmm(chainKey, 'swap', contracts.swap as `0x${string}`, SWAP_ABI, pc, latest, deadline) });
   }
   if (contracts.vault) {
-    jobs.push({ key: 'vault', run: () => scanVault(chainKey, contracts.vault as `0x${string}`, pc, deadline) });
+    jobs.push({ key: 'vault', run: (latest, deadline) => scanVault(chainKey, contracts.vault as `0x${string}`, pc, latest, deadline) });
   }
   if (contracts.cctp) {
-    jobs.push({ key: 'cctp', run: () => scanCctp(chainKey, contracts.cctp as `0x${string}`, pc, deadline) });
+    jobs.push({ key: 'cctp', run: (latest, deadline) => scanCctp(chainKey, contracts.cctp as `0x${string}`, pc, latest, deadline) });
   }
   return jobs;
 }
 
 const CHAIN_KEYS = Object.keys(CHAINS);
-// Each chain gets its OWN dedicated slice of the total budget, so one chain
-// (even a single-contract one like eth_sepolia/base_sepolia) can never eat
-// the whole run and starve the others — this was happening even with
-// chain-level rotation, since rotation only changes WHO goes first, not how
-// much of the shared clock a leading chain is allowed to consume.
 const PER_CHAIN_BUDGET_MS = Math.floor(TIME_BUDGET_MS / CHAIN_KEYS.length);
 
 export async function runOnce() {
@@ -315,22 +314,31 @@ export async function runOnce() {
       results[chainKey] = 'skipped: overall time budget exhausted, will resume next run';
       continue;
     }
-    // Cap this chain's slice at whatever's actually left, so a chain late in
-    // rotation never gets a deadline past the overall run limit.
     const chainDeadline = Math.min(Date.now() + PER_CHAIN_BUDGET_MS, overallDeadline);
-
     const pc = rpcClient(chainKey as keyof typeof CHAINS);
-    const jobs = buildContractJobs(chainKey, cfg, pc, chainDeadline);
-    const offset = (await getRotationOffset(chainKey)) % jobs.length;
-    const rotatedJobs = jobs.slice(offset).concat(jobs.slice(0, offset));
-    if (jobs.length > 1) {
-      await setRotationOffset(chainKey, (offset + 1) % jobs.length);
-    }
 
     try {
-      for (const job of rotatedJobs) {
+      // Fetch latest block ONCE per chain, shared across every job below —
+      // saves 3 redundant paced RPC calls per chain per run versus each job
+      // fetching it independently.
+      const latest = await rpcCall(() => pc.getBlockNumber(), chainDeadline);
+
+      const jobs = buildContractJobs(chainKey, cfg, pc);
+      const offset = (await getRotationOffset(chainKey)) % jobs.length;
+      const rotatedJobs = jobs.slice(offset).concat(jobs.slice(0, offset));
+      if (jobs.length > 1) {
+        await setRotationOffset(chainKey, (offset + 1) % jobs.length);
+      }
+
+      // Give every job in this chain its own fair slice of whatever time is
+      // actually LEFT at the moment it starts (not a static up-front split) —
+      // so a job that finishes early (fully caught up) hands its unused time
+      // forward to the next job instead of it going to waste.
+      for (let i = 0; i < rotatedJobs.length; i++) {
         if (Date.now() >= chainDeadline) break;
-        await job.run();
+        const jobsLeft = rotatedJobs.length - i;
+        const jobDeadline = Math.min(Date.now() + Math.floor((chainDeadline - Date.now()) / jobsLeft), chainDeadline);
+        await rotatedJobs[i].run(latest, jobDeadline);
       }
       results[chainKey] = Date.now() < chainDeadline ? 'ok' : 'ok: partial, chain time slice exhausted, will resume next run';
     } catch (err: any) {
