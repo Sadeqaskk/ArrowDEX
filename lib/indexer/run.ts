@@ -1,13 +1,27 @@
 import { createPublicClient, http, formatUnits, type PublicClient } from 'viem';
 import { getSupabaseServer } from '@/lib/supabase/server';
-import { CHAINS, BLOCK_CHUNK_SIZE } from './chains';
+import { CHAINS } from './chains';
 import { POOL_ABI, SWAP_ABI, VAULT_ABI, CCTP_ABI, ERC20_DECIMALS_ABI, VAULT_TOKEN_GETTER_ABI } from './abis';
 import { POOLS, getTokenBySymbol } from '@/lib/swapConfig';
 
 const SWAP_FEE_BPS = 30n;
 const TIME_BUDGET_MS = 40_000;
-const MIN_REQUEST_INTERVAL_MS = 2500;
+
+// Was a fixed 2500ms between EVERY RPC call, regardless of whether the
+// provider needed it. That alone capped throughput at ~0.4 calls/sec no
+// matter how big the chunk size was. Real throttling protection stays via
+// the existing isLimitError() retry+backoff below — this is just no longer
+// paying a blanket tax on every call up front.
+const MIN_REQUEST_INTERVAL_MS = 150;
 let lastRequestTime = 0;
+
+// Starting chunk size — large, since Arc doesn't publish an eth_getLogs
+// range cap. If a request is ever rejected specifically for range size (not
+// a generic rate limit), we shrink and remember the safe size for the rest
+// of this run instead of re-learning it every chunk.
+const INITIAL_CHUNK_SIZE = 5000n;
+const MIN_CHUNK_SIZE = 100n;
+let learnedChunkSize = INITIAL_CHUNK_SIZE;
 
 class BudgetExceededError extends Error {
   constructor() {
@@ -31,6 +45,15 @@ function isLimitError(err: any) {
   return msg.includes('rate limit') || msg.includes('exceeds defined limit');
 }
 
+// Range-size errors look different across providers ("block range too
+// large", "query returned more than X results", "range exceeds", etc.) —
+// this is intentionally broad rather than trying to match Arc's exact
+// wording, since we don't have that documented anywhere.
+function isRangeError(err: any) {
+  const msg = (err?.message || String(err)).toLowerCase();
+  return msg.includes('range') || msg.includes('too many') || msg.includes('limit exceeded') || msg.includes('query returned more than');
+}
+
 async function rpcCall<T>(fn: () => Promise<T>, deadline: number, maxRetries = 3): Promise<T> {
   let lastErr: any;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -41,7 +64,7 @@ async function rpcCall<T>(fn: () => Promise<T>, deadline: number, maxRetries = 3
     } catch (err: any) {
       lastErr = err;
       if (!isLimitError(err) || attempt === maxRetries) throw err;
-      await sleep(3000 * Math.pow(2, attempt));
+      await sleep(2000 * Math.pow(2, attempt));
     }
   }
   throw lastErr;
@@ -141,35 +164,47 @@ async function blockTimestamp(pc: PublicClient, chainKey: string, blockNumber: b
   return ts;
 }
 
-async function getLogsPerEvent(pc: PublicClient, address: `0x${string}`, abi: any[], fromBlock: bigint, toBlock: bigint, deadline: number) {
+// Combines every event type for a contract into ONE getLogs call (viem
+// supports an `events` array) instead of one call per event type — cuts
+// 2-3 RPC round-trips down to 1 per chunk for pool/swap/cctp-style ABIs.
+// If a chunk's range gets rejected as too large, shrinks the *shared*
+// learnedChunkSize so every subsequent chunk (any contract, this run)
+// uses the smaller size immediately instead of re-discovering it each time.
+async function getLogsForRange(
+  pc: PublicClient,
+  address: `0x${string}`,
+  abi: any[],
+  fromBlock: bigint,
+  toBlock: bigint,
+  deadline: number
+): Promise<any[]> {
   const eventAbis = abi.filter((item) => item.type === 'event');
-  const allLogs: any[] = [];
-  for (const eventAbi of eventAbis) {
-    const logs = await rpcCall(() => pc.getLogs({ address, event: eventAbi, fromBlock, toBlock }), deadline);
-    allLogs.push(...(logs as any[]));
+  try {
+    const logs = await rpcCall(() => pc.getLogs({ address, events: eventAbis as any, fromBlock, toBlock }), deadline);
+    return (logs as any[]).sort((a, b) => Number(a.blockNumber - b.blockNumber) || a.logIndex - b.logIndex);
+  } catch (err) {
+    if (err instanceof BudgetExceededError) throw err;
+    if (isRangeError(err) && toBlock - fromBlock > MIN_CHUNK_SIZE) {
+      // Shrink the shared chunk size and let the caller retry with a
+      // smaller range on its next loop iteration rather than looping here.
+      learnedChunkSize = (toBlock - fromBlock) / 2n > MIN_CHUNK_SIZE ? (toBlock - fromBlock) / 2n : MIN_CHUNK_SIZE;
+      const narrowedTo = fromBlock + learnedChunkSize > toBlock ? toBlock : fromBlock + learnedChunkSize;
+      const logs = await rpcCall(() => pc.getLogs({ address, events: eventAbis as any, fromBlock, toBlock: narrowedTo }), deadline);
+      return (logs as any[]).sort((a, b) => Number(a.blockNumber - b.blockNumber) || a.logIndex - b.logIndex);
+    }
+    throw err;
   }
-  allLogs.sort((a, b) => Number(a.blockNumber - b.blockNumber) || a.logIndex - b.logIndex);
-  return allLogs;
 }
 
-// `latest` is now passed in (fetched once per chain, shared across all jobs)
-// instead of each job independently re-fetching it — that was burning a full
-// paced RPC call per job for no reason, on top of the actual chunk-scanning
-// calls that matter.
-//
-// The ENTIRE body is wrapped in try/catch for BudgetExceededError, not just
-// the chunk loop — a job that runs out of time before even its first useful
-// call (e.g. inside getAmmTokenInfo/getVaultToken/getDecimals) now fails
-// quietly and returns, instead of throwing past the loop and aborting every
-// job scheduled after it in that chain's rotation for the run.
 async function scanAmm(chainKey: string, contractKey: 'pool' | 'swap', address: `0x${string}`, abi: any, pc: PublicClient, latest: bigint, deadline: number) {
   try {
     const { tokenA, tokenB, decA, decB } = getAmmTokenInfo(address);
     let cursor = await getCursor(chainKey, contractKey);
 
     while (cursor < latest && Date.now() < deadline) {
-      const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-      const logs = await getLogsPerEvent(pc, address, abi, cursor + 1n, toBlock, deadline);
+      const chunkSize = learnedChunkSize;
+      const toBlock = cursor + chunkSize > latest ? latest : cursor + chunkSize;
+      const logs = await getLogsForRange(pc, address, abi, cursor + 1n, toBlock, deadline);
       const rows = [];
 
       for (const log of logs as any[]) {
@@ -219,8 +254,9 @@ async function scanVault(chainKey: string, address: `0x${string}`, pc: PublicCli
     let cursor = await getCursor(chainKey, 'vault');
 
     while (cursor < latest && Date.now() < deadline) {
-      const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-      const logs = await getLogsPerEvent(pc, address, VAULT_ABI as unknown as any[], cursor + 1n, toBlock, deadline);
+      const chunkSize = learnedChunkSize;
+      const toBlock = cursor + chunkSize > latest ? latest : cursor + chunkSize;
+      const logs = await getLogsForRange(pc, address, VAULT_ABI as unknown as any[], cursor + 1n, toBlock, deadline);
       const rows = [];
 
       for (const log of logs as any[]) {
@@ -247,8 +283,9 @@ async function scanCctp(chainKey: string, address: `0x${string}`, pc: PublicClie
     let cursor = await getCursor(chainKey, 'cctp');
 
     while (cursor < latest && Date.now() < deadline) {
-      const toBlock = cursor + BLOCK_CHUNK_SIZE > latest ? latest : cursor + BLOCK_CHUNK_SIZE;
-      const logs = await getLogsPerEvent(pc, address, CCTP_ABI as unknown as any[], cursor + 1n, toBlock, deadline);
+      const chunkSize = learnedChunkSize;
+      const toBlock = cursor + chunkSize > latest ? latest : cursor + chunkSize;
+      const logs = await getLogsForRange(pc, address, CCTP_ABI as unknown as any[], cursor + 1n, toBlock, deadline);
       const rows = [];
 
       for (const log of logs as any[]) {
@@ -272,8 +309,6 @@ async function scanCctp(chainKey: string, address: `0x${string}`, pc: PublicClie
   }
 }
 
-// A job takes `latest` (shared, fetched once per chain) and its own deadline
-// at call time, so each job gets a genuinely independent, fairly-sized slice.
 type ContractJob = { key: string; run: (latest: bigint, deadline: number) => Promise<void> };
 
 function buildContractJobs(chainKey: string, cfg: (typeof CHAINS)[keyof typeof CHAINS], pc: PublicClient): ContractJob[] {
@@ -318,9 +353,6 @@ export async function runOnce() {
     const pc = rpcClient(chainKey as keyof typeof CHAINS);
 
     try {
-      // Fetch latest block ONCE per chain, shared across every job below —
-      // saves 3 redundant paced RPC calls per chain per run versus each job
-      // fetching it independently.
       const latest = await rpcCall(() => pc.getBlockNumber(), chainDeadline);
 
       const jobs = buildContractJobs(chainKey, cfg, pc);
@@ -330,10 +362,6 @@ export async function runOnce() {
         await setRotationOffset(chainKey, (offset + 1) % jobs.length);
       }
 
-      // Give every job in this chain its own fair slice of whatever time is
-      // actually LEFT at the moment it starts (not a static up-front split) —
-      // so a job that finishes early (fully caught up) hands its unused time
-      // forward to the next job instead of it going to waste.
       for (let i = 0; i < rotatedJobs.length; i++) {
         if (Date.now() >= chainDeadline) break;
         const jobsLeft = rotatedJobs.length - i;

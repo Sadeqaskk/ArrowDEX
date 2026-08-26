@@ -5,7 +5,7 @@ import { DesktopModeProvider } from '../components/DesktopModeContext';
 
 export const metadata = {
   title: 'Arrow DEX — Cross-Chain Exchange',
-  description: 'Swap, bridge, and stake USDC across ARC Testnet, Ethereum Sepolia, and Base Sepolia.',
+  description: 'Swap, bridge,Vult and Factory,Chart and stake USDC across ARC Testnet, Ethereum Sepolia, and Base Sepolia.',
   icons: {
     icon: '/fonts/tokens/arrow.png',
     shortcut: '/fonts/tokens/arrow.png',
