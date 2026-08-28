@@ -13,5 +13,5 @@ jobs:
       - name: Call bots endpoint
         run: |
           curl -s -w "\nHTTP_STATUS:%{http_code}\n" \
-            -X GET "https://arrowdex.site/api/bots/run" \
+            -X GET "https://arrowdex.vercel.app/api/bots/run" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
