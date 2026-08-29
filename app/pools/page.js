@@ -3,13 +3,40 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import AppShell from '../../components/AppShell';
 import Modal from '../../components/Modal';
+import PremiumSelector from '../../components/PremiumSelector';
 import { useWallet } from '../../lib/WalletContext';
-import { getPoolState, addLiquidity, removeLiquidity, wrapUsdc, unwrapUsdc } from '../../lib/pool';
-import { POOL_CONFIG } from '../../lib/poolConfig';
+import {
+  getPoolState, addLiquidity, removeLiquidity, wrapUsdc, unwrapUsdc,
+  getEurcPoolState, addEurcLiquidity, removeEurcLiquidity,
+} from '../../lib/pool';
+import { POOL_CONFIG, EURC_POOL_CONFIG } from '../../lib/poolConfig';
 import { useNotify } from '../../components/NotificationProvider';
 
 const EXPLORER_TX = (hash) => `https://testnet.arcscan.app/tx/${hash}`;
 const EXPLORER_ADDR = (addr) => `https://testnet.arcscan.app/address/${addr}`;
+
+// Real token artwork for the pair badge — same folder EngineLogo already
+// pulls from, so every icon on this page comes from one source of truth.
+const POOL_OPTIONS = [
+  {
+    key: 'wusdcArrow',
+    label: 'WUSDC / ARROW',
+    sublabel: 'Constant-product AMM · 0.30% fee',
+    pair: [
+      { symbol: 'W', logo: '/fonts/tokens/wusdc.png' },
+      { symbol: 'A', logo: '/fonts/tokens/arrow.png' },
+    ],
+  },
+  {
+    key: 'wusdcEurc',
+    label: 'WUSDC / EURC',
+    sublabel: 'Constant-product AMM · 0.30% fee',
+    pair: [
+      { symbol: 'W', logo: '/fonts/tokens/wusdc.png' },
+      { symbol: 'E', logo: '/fonts/tokens/eurc.png' },
+    ],
+  },
+];
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -43,6 +70,14 @@ function LivePulse({ ok }) {
 export default function PoolsPage() {
   const { address, isConnected, connect } = useWallet();
   const notify = useNotify();
+
+  // Which pool is selected — 'wusdcArrow' is the original default, so
+  // everything below renders exactly as it always did until this changes.
+  const [poolKey, setPoolKey] = useState('wusdcArrow');
+  const isEurc = poolKey === 'wusdcEurc';
+  const activePoolConfig = isEurc ? EURC_POOL_CONFIG : POOL_CONFIG;
+  const tokenBSymbol = isEurc ? 'EURC' : 'ARROW';
+  const tokenBDotColor = isEurc ? 'bg-[#F5C451]' : 'bg-[#8B7FFF]';
 
   const [poolState, setPoolState] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -86,7 +121,7 @@ export default function PoolsPage() {
 
     while (attempt < maxAttempts) {
       try {
-        const state = await getPoolState(address);
+        const state = isEurc ? await getEurcPoolState(address) : await getPoolState(address);
         setPoolState(state);
         setError(null);
         break;
@@ -111,12 +146,21 @@ export default function PoolsPage() {
 
     setLoading(false);
     refreshingRef.current = false;
-  }, [address]);
+  }, [address, isEurc]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  // Reset in-flight amounts whenever the selected pool changes, so a WUSDC
+  // amount typed for one pool never gets silently submitted to the other.
+  useEffect(() => {
+    setAmountWusdc('');
+    setAmountArrow('');
+    setRemoveAmount('');
+    setPoolState(null);
+  }, [poolKey]);
+
   const reserveWusdc = poolState ? parseFloat(poolState.reserveWusdc) : 0;
-  const reserveArrow = poolState ? parseFloat(poolState.reserveArrow) : 0;
+  const reserveArrow = poolState ? parseFloat(isEurc ? poolState.reserveEurc : poolState.reserveArrow) : 0;
   const totalSupply = poolState ? parseFloat(poolState.totalSupply) : 0;
   const lpBalance = poolState ? parseFloat(poolState.lpBalance) : 0;
 
@@ -135,7 +179,7 @@ export default function PoolsPage() {
   const donutBackground = poolState && (reserveWusdc + reserveArrow) > 0
     ? (() => {
         const wusdcValuePct = tvlWusdc > 0 ? (reserveWusdc / tvlWusdc) * 100 : 50;
-        return `conic-gradient(#5FE0A8 0% ${wusdcValuePct}%, #8B7FFF ${wusdcValuePct}% 100%)`;
+        return `conic-gradient(#5FE0A8 0% ${wusdcValuePct}%, ${isEurc ? '#F5C451' : '#8B7FFF'} ${wusdcValuePct}% 100%)`;
       })()
     : 'conic-gradient(rgba(255,255,255,0.06) 0% 100%)';
 
@@ -174,7 +218,7 @@ export default function PoolsPage() {
 
   async function copyAddress() {
     try {
-      await navigator.clipboard.writeText(POOL_CONFIG.pool.address);
+      await navigator.clipboard.writeText(activePoolConfig.pool.address);
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch { /* clipboard unavailable — ignore */ }
@@ -188,17 +232,24 @@ export default function PoolsPage() {
     setTxHash(null);
     try {
       setModalStep(1);
-      const hash = await addLiquidity({
-        account: address,
-        amountWusdc,
-        amountArrow,
-        onStatus: setModalStatus,
-      });
+      const hash = isEurc
+        ? await addEurcLiquidity({
+            account: address,
+            amountWusdc,
+            amountEurc: amountArrow,
+            onStatus: setModalStatus,
+          })
+        : await addLiquidity({
+            account: address,
+            amountWusdc,
+            amountArrow,
+            onStatus: setModalStatus,
+          });
       setTxHash(hash);
       notify({
         type: 'addLiquidity',
         title: 'Added Liquidity',
-        message: `${amountWusdc} WUSDC + ${amountArrow} ARROW deposited`,
+        message: `${amountWusdc} WUSDC + ${amountArrow} ${tokenBSymbol} deposited`,
         txHash: hash,
       });
       setModalStep(2);
@@ -220,11 +271,17 @@ export default function PoolsPage() {
     setTxHash(null);
     try {
       setModalStep(1);
-      const hash = await removeLiquidity({
-        account: address,
-        lpAmount: removeAmount,
-        onStatus: setModalStatus,
-      });
+      const hash = isEurc
+        ? await removeEurcLiquidity({
+            account: address,
+            lpAmount: removeAmount,
+            onStatus: setModalStatus,
+          })
+        : await removeLiquidity({
+            account: address,
+            lpAmount: removeAmount,
+            onStatus: setModalStatus,
+          });
       setTxHash(hash);
       notify({
         type: 'removeLiquidity',
@@ -294,13 +351,16 @@ export default function PoolsPage() {
     }
   }
 
+  const wusdcBalance = poolState ? poolState.wusdcBalance : null;
+  const tokenBBalance = poolState ? (isEurc ? poolState.eurcBalance : poolState.arrowBalance) : null;
+
   return (
     <AppShell>
       <div className="max-w-[620px] mx-auto">
         <div className="mb-5 flex items-start justify-between gap-3">
           <div>
             <div className="card-label mb-2 flex items-center gap-1.5"><LivePulse ok={!error} /> Liquidity</div>
-            <h1 className="text-2xl sm:text-[28px] font-bold">WUSDC / ARROW Pool</h1>
+            <h1 className="text-2xl sm:text-[28px] font-bold">WUSDC / {tokenBSymbol} Pool</h1>
             <p className="text-dim text-sm mt-1.5">
               A real constant-product AMM on Arc Testnet. Deposit both tokens to earn 0.30% of every trade.
             </p>
@@ -308,6 +368,11 @@ export default function PoolsPage() {
           <button onClick={refresh} disabled={loading} className="text-xs text-indigo-bright font-semibold disabled:opacity-40 flex-shrink-0">
             {loading ? 'Refreshing…' : 'Refresh'}
           </button>
+        </div>
+
+        {/* Pool selector — new. Defaults to WUSDC/ARROW so nothing below changes unless switched. */}
+        <div className="mb-4">
+          <PremiumSelector options={POOL_OPTIONS} value={poolKey} onChange={setPoolKey} />
         </div>
 
         {/* Contract badge — same treatment as the Swap page's engine badge */}
@@ -335,10 +400,10 @@ export default function PoolsPage() {
               <div className="text-[11px] text-dim mb-1.5">Pool contract address</div>
               <div className="flex items-center gap-2 bg-white/[0.03] rounded-[10px] px-3 py-2">
                 <span className="font-mono text-[12px] text-ivory truncate flex-1">
-                  {POOL_CONFIG.pool.address.slice(0, 10)}…{POOL_CONFIG.pool.address.slice(-8)}
+                  {activePoolConfig.pool.address.slice(0, 10)}…{activePoolConfig.pool.address.slice(-8)}
                 </span>
                 <button onClick={copyAddress} className="text-indigo-bright text-[11px] font-semibold flex-shrink-0">{copied ? 'Copied' : 'Copy'}</button>
-                <a href={EXPLORER_ADDR(POOL_CONFIG.pool.address)} target="_blank" rel="noreferrer" className="text-indigo-bright text-[11px] font-semibold flex-shrink-0">View ↗</a>
+                <a href={EXPLORER_ADDR(activePoolConfig.pool.address)} target="_blank" rel="noreferrer" className="text-indigo-bright text-[11px] font-semibold flex-shrink-0">View ↗</a>
               </div>
             </div>
           )}
@@ -361,7 +426,7 @@ export default function PoolsPage() {
               </div>
               <div className="text-[11px] space-y-1">
                 <div className="flex items-center gap-1.5 text-dim"><span className="w-2 h-2 rounded-full bg-[#5FE0A8]" /> WUSDC</div>
-                <div className="flex items-center gap-1.5 text-dim"><span className="w-2 h-2 rounded-full bg-[#8B7FFF]" /> ARROW</div>
+                <div className="flex items-center gap-1.5 text-dim"><span className={`w-2 h-2 rounded-full ${tokenBDotColor}`} /> {tokenBSymbol}</div>
               </div>
             </div>
 
@@ -371,7 +436,7 @@ export default function PoolsPage() {
                 <div className="font-mono text-xl font-bold">{poolState ? fmt(reserveWusdc, 2) : '—'}</div>
               </div>
               <div>
-                <div className="card-label mb-1.5">ARROW Reserve</div>
+                <div className="card-label mb-1.5">{tokenBSymbol} Reserve</div>
                 <div className="font-mono text-xl font-bold">{poolState ? fmt(reserveArrow, 2) : '—'}</div>
               </div>
               <div>
@@ -400,7 +465,7 @@ export default function PoolsPage() {
                   </div>
                 </div>
                 <div className="text-[11px] text-dim">
-                  Withdrawable now: <span className="text-ivory font-mono">{fmt(yourWusdcValue, 2)} WUSDC</span> + <span className="text-ivory font-mono">{fmt(yourArrowValue, 2)} ARROW</span>
+                  Withdrawable now: <span className="text-ivory font-mono">{fmt(yourWusdcValue, 2)} WUSDC</span> + <span className="text-ivory font-mono">{fmt(yourArrowValue, 2)} {tokenBSymbol}</span>
                 </div>
               </div>
             </div>
@@ -409,7 +474,7 @@ export default function PoolsPage() {
           {error && <div className="relative mt-4 text-sm text-danger">{error}</div>}
         </div>
 
-        {/* Wrap / Unwrap */}
+        {/* Wrap / Unwrap — unchanged, always WUSDC<->USDC regardless of selected pool */}
         {isConnected && (
           <div className="glass p-5 sm:p-7 mb-5">
             <div className="flex gap-2 mb-5">
@@ -458,7 +523,7 @@ export default function PoolsPage() {
                 <div className="bg-white/[0.025] border border-white/5 rounded-[16px] p-5 mb-3">
                   <div className="flex justify-between text-[11.5px] text-dim mb-3">
                     <span>WUSDC</span>
-                    <span>Balance: {poolState ? fmt(poolState.wusdcBalance) : '—'}</span>
+                    <span>Balance: {poolState ? fmt(wusdcBalance) : '—'}</span>
                   </div>
                   <input
                     type="number"
@@ -509,7 +574,7 @@ export default function PoolsPage() {
               <div className="bg-white/[0.025] border border-white/5 rounded-[16px] p-5 mb-3">
                 <div className="flex justify-between text-[11.5px] text-dim mb-3">
                   <span>WUSDC</span>
-                  <span>Balance: {poolState ? fmt(poolState.wusdcBalance) : '—'}</span>
+                  <span>Balance: {poolState ? fmt(wusdcBalance) : '—'}</span>
                 </div>
                 <input
                   type="number"
@@ -526,8 +591,8 @@ export default function PoolsPage() {
               </div>
               <div className="bg-white/[0.025] border border-white/5 rounded-[16px] p-5 mb-5">
                 <div className="flex justify-between text-[11.5px] text-dim mb-3">
-                  <span>ARROW</span>
-                  <span>Balance: {poolState ? fmt(poolState.arrowBalance) : '—'}</span>
+                  <span>{tokenBSymbol}</span>
+                  <span>Balance: {poolState ? fmt(tokenBBalance) : '—'}</span>
                 </div>
                 <input
                   type="number"
@@ -580,7 +645,7 @@ export default function PoolsPage() {
                     <span className="font-mono font-semibold">{fmt(estRemoveOut.wusdc)}</span>
                   </div>
                   <div className="flex justify-between text-sm">
-                    <span className="text-dim">ARROW</span>
+                    <span className="text-dim">{tokenBSymbol}</span>
                     <span className="font-mono font-semibold">{fmt(estRemoveOut.arrow)}</span>
                   </div>
                 </div>

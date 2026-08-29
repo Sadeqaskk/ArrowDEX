@@ -50,6 +50,15 @@ export const NAV_GROUPS = [
           <path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z" />
         </svg>
       ) },
+      { href: '/agent', label: 'AI Agent', icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+          <path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1" />
+          <rect x="7" y="7" width="10" height="10" rx="3" />
+          <circle cx="9.5" cy="11.5" r="1" fill="currentColor" stroke="none" />
+          <circle cx="14.5" cy="11.5" r="1" fill="currentColor" stroke="none" />
+          <path d="M9.5 14.5c.6.6 1.4.9 2.5.9s1.9-.3 2.5-.9" />
+        </svg>
+      ) },
     ],
   },
   {
