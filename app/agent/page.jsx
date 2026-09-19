@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import {
   ArrowUp,
   Loader2,
@@ -18,16 +18,15 @@ import {
   Check,
 } from 'lucide-react';
 import AppShell from '../../components/AppShell';
+import { useWallet } from '../../lib/WalletContext';
+import { getChainList } from '../../lib/chains';
 import { useAgentChat } from '@/lib/agent/useAgentChat';
 import { useNotify } from '../../components/NotificationProvider';
 import { Clock, X as XIcon } from 'lucide-react';
 
-const EXPLORER_TX = (hash) => `https://testnet.arcscan.app/tx/${hash}`;
-const EXPLORER_ADDR = (addr) => `https://testnet.arcscan.app/address/${addr}`;
-
 const CAPABILITIES = [
   { icon: Repeat, label: 'Swap', hint: 'USDC → EURC, WUSDC → ARROW' },
-  { icon: ArrowRightLeft, label: 'Bridge', hint: 'Arc, Ethereum Sepolia, Base Sepolia' },
+  { icon: ArrowRightLeft, label: 'Bridge', hint: 'Arc, Ethereum Sepolia, Base Sepolia', mainnetHint: 'Arc, Ethereum, Base' },
   { icon: LineChart, label: 'Chart', hint: 'Live pool pricing' },
   { icon: Droplets, label: 'Liquidity', hint: 'Add / remove with amount' },
   { icon: Lock, label: 'Vault', hint: 'Stake, withdraw, exit' },
@@ -35,6 +34,10 @@ const CAPABILITIES = [
   { icon: Trophy, label: 'Leaderboard', hint: 'Your rank, fees, volume' },
   { icon: BookOpen, label: 'Docs', hint: 'Open documentation' },
 ];
+
+// On Mainnet only Bridge (plus the docs link, which isn't chain-dependent)
+// is live. Everything else shows as "Soon" until it launches there.
+const MAINNET_LIVE = new Set(['Bridge', 'Docs']);
 
 const SUGGESTIONS = [
   'Swap 10 USDC to EURC',
@@ -44,6 +47,47 @@ const SUGGESTIONS = [
   'What did I do today?',
   'Stake 25 ARROW-LP',
 ];
+
+const SUGGESTIONS_MAINNET = [
+  'Bridge 20 USDC from Ethereum to Arc',
+  'Bridge 10 USDC from Base to Arc',
+  'Bridge 5 USDC from Arc to Base',
+];
+
+// Client-side guard for Mainnet: only let bridge requests through, and stop
+// anything that also asks for another action ("swap then bridge…").
+const BRIDGE_RE = /bridg|cctp/i;
+const OTHER_ACTION_RE = /\b(swap|stake|unstake|vault|liquidity|wrap|unwrap|claim|withdraw|exit|faucet)\b/i;
+function isBridgeOnlyRequest(text) {
+  return BRIDGE_RE.test(text) && !OTHER_ACTION_RE.test(text);
+}
+
+// Testnet ↔ Mainnet pill — same as the dashboard/bridge, shared network mode.
+function NetworkModeToggle({ mode, onChange }) {
+  return (
+    <div className="inline-flex items-center rounded-full border border-white/5 bg-white/[0.02] p-0.5">
+      {['testnet', 'mainnet'].map((m) => (
+        <button
+          key={m}
+          onClick={() => onChange(m)}
+          className={`px-3 py-1 rounded-full text-[10.5px] font-mono font-semibold uppercase tracking-wide transition-colors ${
+            mode === m ? 'bg-indigo/25 text-indigo-bright' : 'text-dim hover:text-ivory'
+          }`}
+        >
+          {m}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function SoonTag() {
+  return (
+    <span className="text-[9.5px] font-semibold uppercase tracking-wider bg-white/5 text-dim px-1.5 py-0.5 rounded-full flex-shrink-0">
+      Soon
+    </span>
+  );
+}
 
 // Same mark used on Swap / Vaults / Pools / Chart so every surface in the
 // app reads as one protocol.
@@ -85,11 +129,14 @@ function timeAgo(ts) {
 // Same visual grammar as the single-line receipt below: breathing icon while
 // active, hairline sweep while confirming, success/failed rings on settle —
 // just stacked with a connector so a 4-leg CCTP flow reads as one pipeline.
-function StepRow({ step, isLast }) {
+// `explorer` is the fallback base URL; a step can carry its own (a bridge's
+// burn and mint sit on different chains).
+function StepRow({ step, isLast, explorer }) {
   const { label, status, hash } = step;
   const done = status === 'done';
   const active = status === 'pending';
   const failed = status === 'failed';
+  const base = step.explorer || explorer;
 
   return (
     <div className="relative flex gap-3">
@@ -127,7 +174,7 @@ function StepRow({ step, isLast }) {
         </span>
         {hash && (
           <a
-            href={EXPLORER_TX(hash)}
+            href={`${base}/tx/${hash}`}
             target="_blank"
             rel="noreferrer"
             className="text-[10.5px] font-mono text-indigo-bright hover:text-violetglow transition-colors flex-shrink-0"
@@ -145,7 +192,7 @@ function StepRow({ step, isLast }) {
 // shape throughout so the upgrade from one to the next reads as one
 // continuous beat, not a layout jump. Bridges branch into a leg-by-leg
 // tracker (via `steps`) instead of the single-hash line.
-function TxReceipt({ status, txHash, steps }) {
+function TxReceipt({ status, txHash, steps, explorer }) {
   // Bridge / multi-step path
   if (steps && steps.length) {
     const failed = status === 'failed';
@@ -162,7 +209,7 @@ function TxReceipt({ status, txHash, steps }) {
         )}
         <div className="relative">
           {steps.map((s, i) => (
-            <StepRow key={s.key} step={s} isLast={i === steps.length - 1} />
+            <StepRow key={s.key} step={s} isLast={i === steps.length - 1} explorer={explorer} />
           ))}
         </div>
       </div>
@@ -216,7 +263,7 @@ function TxReceipt({ status, txHash, steps }) {
       </div>
       {txHash && (
         <a
-          href={EXPLORER_TX(txHash)}
+          href={`${explorer}/tx/${txHash}`}
           target="_blank"
           rel="noreferrer"
           className="relative text-[11px] font-semibold text-indigo-bright hover:text-violetglow transition-colors flex-shrink-0"
@@ -229,15 +276,37 @@ function TxReceipt({ status, txHash, steps }) {
 }
 
 export default function AgentPage() {
+  const { networkMode, setNetworkMode } = useWallet();
+  const isMainnet = networkMode === 'mainnet';
+
   const [input, setInput] = useState('');
   const [focused, setFocused] = useState(false);
   const [engineOpen, setEngineOpen] = useState(false);
   const [copied, setCopied] = useState(false);
-  const { messages, pending, send, address } = useAgentChat();
+  const [notice, setNotice] = useState(null);
+
+  // The mode is passed along so the agent's bridge flow can pick the right
+  // chains and attestation service. If useAgentChat doesn't read it yet, this
+  // is ignored — see the note in the reply about the hook.
+  const { messages, pending, send, address } = useAgentChat({ networkMode });
   const scrollRef = useRef(null);
   const notify = useNotify();
   const notifiedRef = useRef(new Set());
   const sessionStartRef = useRef(Date.now());
+
+  // Arc's explorer for the selected network — used for the address link and as
+  // the default for transaction links.
+  const arcExplorer = useMemo(() => {
+    const key = isMainnet ? 'arcMainnet' : 'arcTestnet';
+    return getChainList(networkMode).find((c) => c.key === key)?.explorer;
+  }, [networkMode, isMainnet]);
+  const explorerAddr = (addr) => `${arcExplorer}/address/${addr}`;
+
+  const isLive = (label) => !isMainnet || MAINNET_LIVE.has(label);
+  const suggestions = isMainnet ? SUGGESTIONS_MAINNET : SUGGESTIONS;
+
+  // A stale "Mainnet only supports Bridge" notice shouldn't outlive the mode.
+  useEffect(() => { setNotice(null); }, [isMainnet]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
@@ -254,6 +323,7 @@ export default function AgentPage() {
         title: m.title || 'Agent action complete',
         message: m.text || 'Arrow Agent executed your request.',
         txHash: m.txHash,
+        explorer: m.explorer,
       });
     });
   }, [messages, notify]);
@@ -261,6 +331,13 @@ export default function AgentPage() {
   function submit(text) {
     const val = text ?? input;
     if (!val.trim()) return;
+
+    if (isMainnet && !isBridgeOnlyRequest(val)) {
+      setNotice('On Mainnet the agent only supports Bridge right now. Swap, liquidity, vaults and the rest are coming soon.');
+      return;
+    }
+
+    setNotice(null);
     send(val);
     setInput('');
   }
@@ -275,6 +352,7 @@ export default function AgentPage() {
   }
 
   const empty = !messages || messages.length === 0;
+  const networkLabel = isMainnet ? 'Arc Mainnet' : 'Arc Testnet';
 
   return (
     <AppShell>
@@ -283,10 +361,13 @@ export default function AgentPage() {
         <div>
           {/* Header */}
           <div className="mb-6 motion-safe:animate-agent-rise" style={{ animationDelay: '0ms' }}>
-            <div className="card-label mb-3 tracking-[0.22em] flex items-center gap-2">
-              <span className="w-4 h-px bg-gradient-to-r from-transparent to-indigo-bright/80" />
-              <Sparkles size={11} className="text-indigo-bright" />
-              Arrow Intelligence
+            <div className="flex items-start justify-between gap-3 mb-3">
+              <div className="card-label tracking-[0.22em] flex items-center gap-2">
+                <span className="w-4 h-px bg-gradient-to-r from-transparent to-indigo-bright/80" />
+                <Sparkles size={11} className="text-indigo-bright" />
+                Arrow Intelligence
+              </div>
+              <NetworkModeToggle mode={networkMode} onChange={setNetworkMode} />
             </div>
             <h1 className="text-[32px] sm:text-[40px] font-extrabold tracking-tight leading-[1.08] bg-clip-text text-transparent bg-gradient-to-br from-white via-ivory to-violetglow/80">
               One line in.<br className="hidden sm:block" /> The right transaction out.
@@ -295,6 +376,14 @@ export default function AgentPage() {
               Swap, bridge, stake, check prices, or pull your activity — the agent reads your wallet&apos;s connection and executes for real, right from this conversation.
             </p>
           </div>
+
+          {isMainnet && (
+            <div className="mb-5 text-[12.5px] text-ivory bg-indigo/[0.08] border border-indigo-bright/25 rounded-[12px] px-3.5 py-2.5 leading-relaxed">
+              You&apos;re on Mainnet — the agent moves real USDC here. <strong className="font-semibold">Bridge</strong> is the only action
+              live on Mainnet right now; swap, liquidity, vaults and the rest are coming soon. Double-check the source,
+              destination and amount before confirming in your wallet.
+            </div>
+          )}
 
           {/* Agent Engine badge — same disclosure pattern as ArrowSwap Engine, agent-flavored */}
           <div className="relative mb-5 motion-safe:animate-agent-rise" style={{ animationDelay: '60ms' }}>
@@ -313,7 +402,11 @@ export default function AgentPage() {
                     Arrow Agent Engine
                     <ShieldCheck size={13} className="text-indigo-bright flex-shrink-0" strokeWidth={2.2} />
                   </div>
-                  <div className="text-[11px] text-dim mt-0.5 tracking-wide">Executes real transactions on Arc Testnet</div>
+                  <div className="text-[11px] text-dim mt-0.5 tracking-wide">
+                    {isMainnet
+                      ? 'Bridge live on Arc Mainnet · everything else coming soon'
+                      : 'Executes real transactions on Arc Testnet'}
+                  </div>
                 </div>
               </div>
               <div className="flex items-center gap-2.5 flex-shrink-0">
@@ -333,7 +426,7 @@ export default function AgentPage() {
                   <EngineLogo className="w-10 h-10" />
                   <div>
                     <div className="text-sm font-bold text-ivory">Arrow Agent Engine</div>
-                    <div className="text-[11px] text-dim">Autonomous execution layer · Arc Testnet</div>
+                    <div className="text-[11px] text-dim">Autonomous execution layer · {networkLabel}</div>
                   </div>
                 </div>
 
@@ -347,7 +440,7 @@ export default function AgentPage() {
                       <button onClick={copyAddress} className="text-indigo-bright hover:text-violetglow text-[11px] font-semibold flex-shrink-0 transition-colors">
                         {copied ? 'Copied' : 'Copy'}
                       </button>
-                      <a href={EXPLORER_ADDR(address)} target="_blank" rel="noreferrer" className="text-indigo-bright hover:text-violetglow text-[11px] font-semibold flex-shrink-0 transition-colors">
+                      <a href={explorerAddr(address)} target="_blank" rel="noreferrer" className="text-indigo-bright hover:text-violetglow text-[11px] font-semibold flex-shrink-0 transition-colors">
                         View ↗
                       </a>
                     </>
@@ -356,12 +449,20 @@ export default function AgentPage() {
 
                 <div className="text-[10.5px] text-dim mb-2 uppercase tracking-[0.14em] font-semibold">Session permissions</div>
                 <div className="grid grid-cols-2 gap-1.5">
-                  {CAPABILITIES.slice(0, 6).map(({ label }) => (
-                    <div key={label} className="flex items-center gap-1.5 text-[11.5px] text-ivory/80">
-                      <Check size={12} className="text-success flex-shrink-0" strokeWidth={2.5} />
-                      {label}
-                    </div>
-                  ))}
+                  {CAPABILITIES.slice(0, 6).map(({ label }) => {
+                    const live = isLive(label);
+                    return (
+                      <div key={label} className={`flex items-center gap-1.5 text-[11.5px] ${live ? 'text-ivory/80' : 'text-dim/50'}`}>
+                        {live ? (
+                          <Check size={12} className="text-success flex-shrink-0" strokeWidth={2.5} />
+                        ) : (
+                          <Lock size={11} className="flex-shrink-0" strokeWidth={2} />
+                        )}
+                        {label}
+                        {!live && <SoonTag />}
+                      </div>
+                    );
+                  })}
                 </div>
                 <div className="text-[10.5px] text-dim/60 mt-3 pt-3 border-t border-white/5">
                   Session started {timeAgo(sessionStartRef.current)}
@@ -412,12 +513,16 @@ export default function AgentPage() {
                     <div className="relative mb-5">
                       <EngineLogo className="w-14 h-14 relative" breathe />
                     </div>
-                    <div className="text-[15px] font-bold text-ivory mb-1.5">How can I move things for you?</div>
+                    <div className="text-[15px] font-bold text-ivory mb-1.5">
+                      {isMainnet ? 'Where should I bridge your USDC?' : 'How can I move things for you?'}
+                    </div>
                     <p className="text-[12.5px] text-dim max-w-xs leading-relaxed mb-5">
-                      Try a request in plain language, or pick one below to get started.
+                      {isMainnet
+                        ? 'Bridging is the only action live on Mainnet right now. Try a request in plain language, or pick one below.'
+                        : 'Try a request in plain language, or pick one below to get started.'}
                     </p>
                     <div className="flex flex-wrap justify-center gap-2 max-w-md">
-                      {SUGGESTIONS.slice(0, 4).map((s) => (
+                      {suggestions.slice(0, 4).map((s) => (
                         <button
                           key={s}
                           onClick={() => submit(s)}
@@ -447,7 +552,14 @@ export default function AgentPage() {
                         </div>
 
                         {/* Transaction receipt — single-hash line, or leg-by-leg tracker for bridges */}
-                        {m.status && <TxReceipt status={m.status} txHash={m.txHash} steps={m.steps} />}
+                        {m.status && (
+                          <TxReceipt
+                            status={m.status}
+                            txHash={m.txHash}
+                            steps={m.steps}
+                            explorer={m.explorer || arcExplorer}
+                          />
+                        )}
 
                         {m.ts && (
                           <span className="text-[10px] text-dim/50 px-1">{timeAgo(m.ts)}</span>
@@ -469,6 +581,18 @@ export default function AgentPage() {
               </div>
 
               <div className="relative p-4 border-t border-white/[0.07] flex-shrink-0">
+                {notice && (
+                  <div className="mb-3 flex items-start justify-between gap-3 text-[12px] text-ivory bg-indigo/[0.08] border border-indigo-bright/25 rounded-[12px] px-3.5 py-2.5 leading-relaxed">
+                    <span>{notice}</span>
+                    <button
+                      onClick={() => setNotice(null)}
+                      className="text-dim hover:text-ivory transition-colors flex-shrink-0 mt-0.5"
+                      aria-label="Dismiss"
+                    >
+                      <XIcon size={12} strokeWidth={2.5} />
+                    </button>
+                  </div>
+                )}
                 <div
                   className={`flex items-center gap-2 rounded-full bg-black/30 border transition-all px-2 py-2 ${
                     focused ? 'border-indigo-bright/50 shadow-[0_0_0_3px_rgba(108,99,255,0.12)]' : 'border-white/[0.07]'
@@ -479,11 +603,11 @@ export default function AgentPage() {
                   </span>
                   <input
                     value={input}
-                    onChange={(e) => setInput(e.target.value)}
+                    onChange={(e) => { setInput(e.target.value); if (notice) setNotice(null); }}
                     onFocus={() => setFocused(true)}
                     onBlur={() => setFocused(false)}
                     onKeyDown={(e) => e.key === 'Enter' && submit()}
-                    placeholder="Ask the agent to do something…"
+                    placeholder={isMainnet ? 'Try: Bridge 20 USDC from Ethereum to Arc' : 'Ask the agent to do something…'}
                     className="flex-1 bg-transparent outline-none text-[14px] font-mono placeholder:text-dim/50 px-1 text-ivory"
                   />
                   <button
@@ -508,7 +632,7 @@ export default function AgentPage() {
           <div className="motion-safe:animate-agent-rise" style={{ animationDelay: '160ms' }}>
             <div className="card-label mb-3">Try asking</div>
             <div className="flex flex-wrap gap-2">
-              {SUGGESTIONS.map((s) => (
+              {suggestions.map((s) => (
                 <button
                   key={s}
                   onClick={() => submit(s)}
@@ -523,20 +647,34 @@ export default function AgentPage() {
           <div className="motion-safe:animate-agent-rise" style={{ animationDelay: '200ms' }}>
             <div className="card-label mb-3">Capabilities</div>
             <div className="space-y-2">
-              {CAPABILITIES.map(({ icon: Icon, label, hint }) => (
-                <div
-                  key={label}
-                  className="group flex items-start gap-3 rounded-[14px] px-3.5 py-3 bg-white/[0.02] hover:bg-white/[0.045] border border-white/5 hover:border-indigo-bright/25 transition-all hover:-translate-y-[1px] hover:shadow-[0_10px_28px_-14px_rgba(108,99,255,0.6)]"
-                >
-                  <span className="w-7 h-7 rounded-[9px] bg-indigo/10 text-indigo-bright flex items-center justify-center flex-shrink-0 mt-0.5 group-hover:bg-indigo-bright/20 group-hover:shadow-[0_0_0_3px_rgba(108,99,255,0.12)] transition-all">
-                    <Icon size={14} strokeWidth={1.75} />
-                  </span>
-                  <div>
-                    <div className="text-[13px] font-bold text-ivory">{label}</div>
-                    <div className="text-[11px] text-dim mt-0.5">{hint}</div>
+              {CAPABILITIES.map(({ icon: Icon, label, hint, mainnetHint }) => {
+                const live = isLive(label);
+                return (
+                  <div
+                    key={label}
+                    className={`group flex items-start gap-3 rounded-[14px] px-3.5 py-3 border transition-all ${
+                      live
+                        ? 'bg-white/[0.02] hover:bg-white/[0.045] border-white/5 hover:border-indigo-bright/25 hover:-translate-y-[1px] hover:shadow-[0_10px_28px_-14px_rgba(108,99,255,0.6)]'
+                        : 'bg-white/[0.01] border-white/5 opacity-50'
+                    }`}
+                  >
+                    <span className={`w-7 h-7 rounded-[9px] flex items-center justify-center flex-shrink-0 mt-0.5 transition-all ${
+                      live
+                        ? 'bg-indigo/10 text-indigo-bright group-hover:bg-indigo-bright/20 group-hover:shadow-[0_0_0_3px_rgba(108,99,255,0.12)]'
+                        : 'bg-white/5 text-dim'
+                    }`}>
+                      <Icon size={14} strokeWidth={1.75} />
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-[13px] font-bold text-ivory">{label}</div>
+                        {!live && <SoonTag />}
+                      </div>
+                      <div className="text-[11px] text-dim mt-0.5">{isMainnet && mainnetHint ? mainnetHint : hint}</div>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </aside>

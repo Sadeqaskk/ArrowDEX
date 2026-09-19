@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useWallet } from '../lib/WalletContext';
+import { getChainList } from '../lib/chains';
 import NetworkSelector from './NetworkSelector';
 import MobileNav from './MobileNav';
 import SearchBar from './SearchBar';
@@ -9,9 +10,6 @@ import MobileSearchModal from './MobileSearchModal';
 import Modal from './Modal';
 import { getFaucetState, claimArrow, isFaucetConfigured } from '../lib/faucet';
 import { useNotificationCenter, NOTIFICATION_TYPE_META, NotificationGlyph } from './NotificationProvider';
-
-const EXPLORER_ADDR = (addr) => `https://testnet.arcscan.app/address/${addr}`;
-const EXPLORER_TX = (hash) => `https://testnet.arcscan.app/tx/${hash}`;
 
 // Deterministic two-tone gradient per address — same idea as Rainbow/MetaMask
 // identicons, without pulling in an image-generation library.
@@ -66,7 +64,20 @@ function useCountdown(targetMs) {
 }
 
 export default function Topbar() {
-  const { address, isConnected, connect, disconnect, network, setNetwork, walletName } = useWallet();
+  const { address, isConnected, connect, disconnect, networkMode, setNetworkMode, walletName } = useWallet();
+  const isMainnet = networkMode === 'mainnet';
+
+  // Explorer links follow the selected network instead of always pointing at
+  // testnet. Arc is the first chain in both lists.
+  const arcExplorer = useMemo(() => {
+    const key = isMainnet ? 'arcMainnet' : 'arcTestnet';
+    return getChainList(networkMode).find((c) => c.key === key)?.explorer;
+  }, [networkMode, isMainnet]);
+  const explorerAddr = (addr) => `${arcExplorer}/address/${addr}`;
+  // `base` lets a notification point at a different chain's explorer (e.g. a
+  // bridge mint on Ethereum) when it carries one; otherwise use Arc's.
+  const explorerTx = (hash, base = arcExplorer) => `${base}/tx/${hash}`;
+
   const [menuOpen, setMenuOpen] = useState(false);
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
   const rootRef = useRef(null);
@@ -97,8 +108,10 @@ export default function Topbar() {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  // The ARROW faucet only exists on testnet — skip it entirely on mainnet and
+  // close it if the user switches over while it's open.
   const refreshFaucet = useCallback(async () => {
-    if (!isFaucetConfigured() || !isConnected) return;
+    if (isMainnet || !isFaucetConfigured() || !isConnected) return;
     try {
       const state = await getFaucetState(address);
       setFaucetState(state);
@@ -106,9 +119,13 @@ export default function Topbar() {
     } catch (err) {
       console.error('Faucet state fetch failed:', err);
     }
-  }, [address, isConnected]);
+  }, [address, isConnected, isMainnet]);
 
   useEffect(() => { refreshFaucet(); }, [refreshFaucet]);
+
+  useEffect(() => {
+    if (isMainnet) setFaucetOpen(false);
+  }, [isMainnet]);
 
   const nextClaimAt = faucetState?.secondsUntilNextClaim > 0 && faucetFetchedAt
     ? faucetFetchedAt + faucetState.secondsUntilNextClaim * 1000
@@ -216,7 +233,7 @@ export default function Topbar() {
                             <div className="flex items-center gap-2 mt-1">
                               <span className="text-[10.5px] text-dim/70">{timeAgo(n.createdAt)}</span>
                               {n.txHash && (
-                                <a href={EXPLORER_TX(n.txHash)} target="_blank" rel="noreferrer" className="text-[10.5px] font-mono font-semibold" style={{ color: meta.accent }}>
+                                <a href={explorerTx(n.txHash, n.explorer)} target="_blank" rel="noreferrer" className="text-[10.5px] font-mono font-semibold" style={{ color: meta.accent }}>
                                   View tx →
                                 </a>
                               )}
@@ -232,7 +249,8 @@ export default function Topbar() {
           )}
         </div>
 
-        {isConnected && isFaucetConfigured() && (
+        {/* ARROW faucet — testnet only */}
+        {isConnected && !isMainnet && isFaucetConfigured() && (
           <div className="relative" ref={faucetRef}>
             <button
               onClick={() => setFaucetOpen((o) => !o)}
@@ -282,7 +300,7 @@ export default function Topbar() {
           </div>
         )}
 
-        <NetworkSelector value={network} onChange={setNetwork} />
+        <NetworkSelector value={networkMode} onChange={setNetworkMode} />
 
         {isConnected ? (
           <div className="relative" ref={rootRef}>
@@ -312,7 +330,7 @@ export default function Topbar() {
                   Copy Address
                 </button>
                 <a
-                  href={EXPLORER_ADDR(address)}
+                  href={explorerAddr(address)}
                   target="_blank"
                   rel="noreferrer"
                   onClick={() => setMenuOpen(false)}
@@ -363,7 +381,7 @@ export default function Topbar() {
           </div>
         )}
         {faucetDone && faucetTxHash && (
-          <a href={EXPLORER_TX(faucetTxHash)} target="_blank" rel="noreferrer" className="text-indigo-bright text-sm font-mono">
+          <a href={explorerTx(faucetTxHash)} target="_blank" rel="noreferrer" className="text-indigo-bright text-sm font-mono">
             View transaction →
           </a>
         )}

@@ -44,8 +44,47 @@ function timeAgo(ts) {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
+// Testnet ↔ Mainnet pill — same look as the other pages, but Mainnet is
+// locked until ArrowFactory is deployed on Arc Mainnet.
+function NetworkModeToggle({ mode, onChange }) {
+  return (
+    <div className="inline-flex items-center rounded-full border border-white/5 bg-white/[0.02] p-0.5">
+      {['testnet', 'mainnet'].map((m) => {
+        const locked = m === 'mainnet';
+        return (
+          <button
+            key={m}
+            onClick={() => !locked && onChange(m)}
+            disabled={locked}
+            className={`px-3 py-1 rounded-full text-[10.5px] font-mono font-semibold uppercase tracking-wide transition-colors flex items-center gap-1.5 ${
+              locked
+                ? 'text-dim/50 cursor-not-allowed'
+                : mode === m
+                  ? 'bg-indigo/25 text-indigo-bright'
+                  : 'text-dim hover:text-ivory'
+            }`}
+          >
+            {m}
+            {locked && (
+              <span className="text-[8.5px] font-semibold normal-case tracking-normal bg-white/5 text-dim px-1.5 py-0.5 rounded-full">
+                Soon
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function FactoryPage() {
-  const { address, isConnected, connect } = useWallet();
+  const { address, isConnected, connect, networkMode, setNetworkMode } = useWallet();
+
+  // The factory only exists on Arc Testnet for now. If the shared mode was
+  // left on mainnet from another page, switch it back so the pill matches.
+  useEffect(() => {
+    if (networkMode === 'mainnet') setNetworkMode('testnet');
+  }, [networkMode, setNetworkMode]);
 
   const [pools, setPools] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -152,13 +191,16 @@ export default function FactoryPage() {
               Every pool deployed and auto-registered with ArrowRouter, in real time.
             </p>
           </div>
-          <button
-            onClick={() => refresh()}
-            disabled={loading}
-            className="text-xs text-indigo-bright font-semibold disabled:opacity-40 flex-shrink-0 hover:text-laser transition-colors hover:drop-shadow-[0_0_6px_rgba(139,127,255,0.6)]"
-          >
-            {loading ? 'Refreshing…' : 'Refresh'}
-          </button>
+          <div className="flex flex-col items-end gap-2 flex-shrink-0">
+            <NetworkModeToggle mode="testnet" onChange={setNetworkMode} />
+            <button
+              onClick={() => refresh()}
+              disabled={loading}
+              className="text-xs text-indigo-bright font-semibold disabled:opacity-40 hover:text-laser transition-colors hover:drop-shadow-[0_0_6px_rgba(139,127,255,0.6)]"
+            >
+              {loading ? 'Refreshing…' : 'Refresh'}
+            </button>
+          </div>
         </div>
 
         {/* Live stats strip */}

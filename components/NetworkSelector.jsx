@@ -8,7 +8,14 @@ export default function NetworkSelector({ value, onChange }) {
   const [activeIndex, setActiveIndex] = useState(-1);
   const rootRef = useRef(null);
 
-  const active = NETWORKS.find((n) => n.id === value) || NETWORKS[0];
+  // `value` is the wallet's networkMode ('testnet' | 'mainnet'), and onChange
+  // below hands back `n.mode` — so match on `mode`, not `id`. Matching on id
+  // never found a hit for 'mainnet', which made this fall through to
+  // NETWORKS[0] (Arc Testnet) no matter what was selected.
+  const active =
+    NETWORKS.find((n) => n.mode === value) ||
+    NETWORKS.find((n) => n.id === value) ||
+    NETWORKS[0];
 
   useEffect(() => {
     function handleClickOutside(e) {
@@ -25,7 +32,7 @@ export default function NetworkSelector({ value, onChange }) {
 
   function selectNetwork(n) {
     if (!n || n.disabled) return;
-    onChange?.(n.id);
+    onChange?.(n.mode);
     setOpen(false);
   }
 

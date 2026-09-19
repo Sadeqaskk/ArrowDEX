@@ -68,8 +68,48 @@ function RankDelta({ delta, isNew }) {
   );
 }
 
+// Testnet ↔ Mainnet pill — same look as the other pages, but Mainnet is
+// locked until the leaderboard tracks Arc Mainnet activity.
+function NetworkModeToggle({ mode, onChange }) {
+  return (
+    <div className="inline-flex items-center rounded-full border border-white/5 bg-white/[0.02] p-0.5">
+      {['testnet', 'mainnet'].map((m) => {
+        const locked = m === 'mainnet';
+        return (
+          <button
+            key={m}
+            onClick={() => !locked && onChange(m)}
+            disabled={locked}
+            className={`px-3 py-1 rounded-full text-[10.5px] font-mono font-semibold uppercase tracking-wide transition-colors flex items-center gap-1.5 ${
+              locked
+                ? 'text-dim/50 cursor-not-allowed'
+                : mode === m
+                  ? 'bg-indigo/25 text-indigo-bright'
+                  : 'text-dim hover:text-ivory'
+            }`}
+          >
+            {m}
+            {locked && (
+              <span className="text-[8.5px] font-semibold normal-case tracking-normal bg-white/5 text-dim px-1.5 py-0.5 rounded-full">
+                Soon
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function LeaderboardPage() {
-  const { address, isConnected, connect } = useWallet();
+  const { address, isConnected, connect, networkMode, setNetworkMode } = useWallet();
+
+  // The leaderboard only tracks Arc Testnet for now. If the shared mode was
+  // left on mainnet from another page, switch it back so the pill matches.
+  useEffect(() => {
+    if (networkMode === 'mainnet') setNetworkMode('testnet');
+  }, [networkMode, setNetworkMode]);
+
   const [category, setCategory] = useState('overall');
   const [search, setSearch] = useState('');
   const { rows, loading, error, refetch } = useLeaderboardTop(category, 50);
@@ -147,13 +187,21 @@ export default function LeaderboardPage() {
               backgroundSize: '28px 28px',
             }}
           />
-          <div className="relative flex flex-col sm:flex-row sm:items-end sm:justify-between gap-6">
+
+          {/* Top row: label on the left, network pill on the right */}
+          <div className="relative flex items-start justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <span className="card-label">Traders Leaderboard · Live</span>
+              <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
+            </div>
+            <div className="flex-shrink-0">
+              <NetworkModeToggle mode="testnet" onChange={setNetworkMode} />
+            </div>
+          </div>
+
+          <div className="relative mt-4 sm:mt-[22px] flex flex-col sm:flex-row sm:items-end sm:justify-between gap-6">
             <div>
-              <div className="flex items-center gap-2">
-                <span className="card-label">Traders Leaderboard · Live</span>
-                <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
-              </div>
-              <div className="mt-4 sm:mt-[22px] text-[13px] text-dim font-medium">
+              <div className="text-[13px] text-dim font-medium">
                 Total network trading volume, all chains combined
               </div>
               <div className="mt-3 text-[42px] sm:text-[60px] font-extrabold leading-[0.95] tracking-tight hero-amount-gradient break-all sm:break-normal">

@@ -4,32 +4,41 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import AppShell from '../components/AppShell';
 import { useWallet } from '../lib/WalletContext';
 import { useRealBalances } from '../lib/useBalances';
-import { CHAINS } from '../lib/chains';
+import { getChainList } from '../lib/chains';
 
 const CHAIN_COLORS = {
   arcTestnet: 'from-[#8B7FFF] to-[#4d3fc9]',
   ethereumSepolia: 'from-[#4D8AFF] to-[#2f5fc9]',
   baseSepolia: 'from-[#5FE0A8] to-[#2f9e7c]',
+  arcMainnet: 'from-[#8B7FFF] to-[#4d3fc9]',
+  ethereumMainnet: 'from-[#4D8AFF] to-[#2f5fc9]',
+  baseMainnet: 'from-[#5FE0A8] to-[#2f9e7c]',
 };
 
 const CHAIN_HEX = {
   arcTestnet: '#8B7FFF',
   ethereumSepolia: '#4D8AFF',
   baseSepolia: '#5FE0A8',
+  arcMainnet: '#8B7FFF',
+  ethereumMainnet: '#4D8AFF',
+  baseMainnet: '#5FE0A8',
 };
 
 const CHAIN_LOGOS = {
   arcTestnet: '/fonts/chains/arc.png',
   ethereumSepolia: '/fonts/chains/ethereum.png',
   baseSepolia: '/fonts/chains/base.png',
+  arcMainnet: '/fonts/chains/arc.png',
+  ethereumMainnet: '/fonts/chains/ethereum.png',
+  baseMainnet: '/fonts/chains/base.png',
 };
 
 // ── Portfolio snapshot tracking (client-side, no backend required) ───────
 // Records total + per-chain USDC value on an interval so the hero card can
-// show a real gain/loss delta and sparkline. This tracks *portfolio value*,
-// not per-trade cost basis — wiring true realized P&L would mean indexing
-// Swap events off the ArrowSwap contract.
-const SNAPSHOT_KEY = (addr) => `arrowdex:pnl:${addr}`;
+// show a real gain/loss delta and sparkline. Snapshots are namespaced by
+// network mode so switching Testnet ↔ Mainnet doesn't mix two unrelated
+// portfolios into one trend line.
+const SNAPSHOT_KEY = (mode, addr) => `arrowdex:pnl:${mode}:${addr}`;
 const SNAPSHOT_MIN_GAP_MS = 15 * 60 * 1000; // don't write more than every 15min
 const SNAPSHOT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // keep 30 days
 const SNAPSHOT_MAX_POINTS = 1000;
@@ -41,20 +50,20 @@ const RANGES = [
   { key: 'ALL', ms: Infinity },
 ];
 
-function loadSnapshots(address) {
+function loadSnapshots(mode, address) {
   if (typeof window === 'undefined' || !address) return [];
   try {
-    const raw = window.localStorage.getItem(SNAPSHOT_KEY(address));
+    const raw = window.localStorage.getItem(SNAPSHOT_KEY(mode, address));
     return raw ? JSON.parse(raw) : [];
   } catch {
     return [];
   }
 }
 
-function saveSnapshot(address, totalUsdc, chainValues) {
+function saveSnapshot(mode, address, totalUsdc, chainValues) {
   if (typeof window === 'undefined' || !address) return [];
   const now = Date.now();
-  const existing = loadSnapshots(address);
+  const existing = loadSnapshots(mode, address);
   const last = existing[existing.length - 1];
 
   let next = existing;
@@ -63,7 +72,7 @@ function saveSnapshot(address, totalUsdc, chainValues) {
       .filter((s) => now - s.t <= SNAPSHOT_MAX_AGE_MS)
       .slice(-SNAPSHOT_MAX_POINTS);
     try {
-      window.localStorage.setItem(SNAPSHOT_KEY(address), JSON.stringify(next));
+      window.localStorage.setItem(SNAPSHOT_KEY(mode, address), JSON.stringify(next));
     } catch { /* storage full/unavailable — tracking just won't persist */ }
   }
   return next;
@@ -136,14 +145,37 @@ function ChangeBadge({ change, changePct, size = 'md', isFallback }) {
   );
 }
 
+// Testnet ↔ Mainnet pill. Kept intentionally small and out of the way — it's
+// a mode switch, not a primary action.
+function NetworkModeToggle({ mode, onChange }) {
+  return (
+    <div className="inline-flex items-center rounded-full border border-white/5 bg-white/[0.02] p-0.5">
+      {['testnet', 'mainnet'].map((m) => (
+        <button
+          key={m}
+          onClick={() => onChange(m)}
+          className={`px-3 py-1 rounded-full text-[10.5px] font-mono font-semibold uppercase tracking-wide transition-colors ${
+            mode === m ? 'bg-indigo/25 text-indigo-bright' : 'text-dim hover:text-ivory'
+          }`}
+        >
+          {m}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export default function DashboardPage() {
-  const { address, isConnected, connect, network } = useWallet();
-  const { balances, totalUsdc, loading, error, lastUpdated, refetch } = useRealBalances(address);
+  const { address, isConnected, connect, network, networkMode, setNetworkMode } = useWallet();
+  const { balances, totalUsdc, loading, error, lastUpdated, refetch } = useRealBalances(address, networkMode);
 
   const [range, setRange] = useState('24H');
   const [snapshots, setSnapshots] = useState([]);
 
-  const chainEntries = Object.values(CHAINS).map((chain) => {
+  const chainList = useMemo(() => getChainList(networkMode), [networkMode]);
+  const gatedChains = useMemo(() => chainList.filter((c) => c.requiresCredentials), [chainList]);
+
+  const chainEntries = chainList.map((chain) => {
     const row = balances[chain.key];
     const usdcVal = row ? parseFloat(row.usdc) : 0;
     const pct = totalUsdc > 0 ? (usdcVal / totalUsdc) * 100 : 0;
@@ -154,15 +186,15 @@ export default function DashboardPage() {
   useEffect(() => {
     if (!address || loading || error || !isConnected) return;
     const chainValues = Object.fromEntries(chainEntries.map((e) => [e.chain.key, e.usdcVal]));
-    const next = saveSnapshot(address, totalUsdc, chainValues);
-    setSnapshots(next.length ? next : loadSnapshots(address));
+    const next = saveSnapshot(networkMode, address, totalUsdc, chainValues);
+    setSnapshots(next.length ? next : loadSnapshots(networkMode, address));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [address, loading, error, isConnected, totalUsdc]);
+  }, [address, loading, error, isConnected, totalUsdc, networkMode]);
 
-  // Also hydrate on address change (covers reload before first snapshot write).
+  // Also hydrate on address or mode change (covers reload / toggle before first snapshot write).
   useEffect(() => {
-    setSnapshots(loadSnapshots(address));
-  }, [address]);
+    setSnapshots(loadSnapshots(networkMode, address));
+  }, [address, networkMode]);
 
   const rangeMs = RANGES.find((r) => r.key === range)?.ms ?? RANGES[0].ms;
   const baseline = useMemo(() => pickBaseline(snapshots, rangeMs), [snapshots, rangeMs]);
@@ -219,13 +251,16 @@ export default function DashboardPage() {
                 <span className={`w-1.5 h-1.5 rounded-full ${isConnected && !error ? 'bg-success animate-pulse' : 'bg-dim/40'}`} />
                 Total Portfolio · Live
               </span>
-              <span className="text-[11px] sm:text-[11.5px] text-dim font-mono text-right flex-shrink-0">
-                {lastUpdated ? `UPDATED ${lastUpdated.toLocaleTimeString()}` : 'NOT LOADED'}
-              </span>
+              <div className="flex items-center gap-2.5 flex-shrink-0">
+                <NetworkModeToggle mode={networkMode} onChange={setNetworkMode} />
+                <span className="hidden sm:inline text-[11px] text-dim font-mono text-right">
+                  {lastUpdated ? `UPDATED ${lastUpdated.toLocaleTimeString()}` : 'NOT LOADED'}
+                </span>
+              </div>
             </div>
             <div className="mt-4 sm:mt-[22px]">
               <div className="text-[13px] text-dim mb-3 font-medium">
-                {isConnected ? 'Real balance across every connected chain' : 'Connect your wallet to see real balances'}
+                {isConnected ? `Real balance across every connected ${networkMode === 'mainnet' ? 'mainnet' : 'testnet'} chain` : 'Connect your wallet to see real balances'}
               </div>
 
               {!isConnected ? (
@@ -273,6 +308,11 @@ export default function DashboardPage() {
               )}
 
               {error && <div className="mt-3 text-sm text-danger">{error}</div>}
+              {networkMode === 'mainnet' && gatedChains.length > 0 && (
+                <div className="mt-3 text-[11.5px] text-dim/80 bg-white/[0.02] border border-white/5 rounded-lg px-3 py-2">
+                  {gatedChains.map((c) => c.name).join(', ')} {gatedChains.length === 1 ? 'is' : 'are'} in Circle's private mainnet phase — balances there will show once you have RPC access.
+                </div>
+              )}
             </div>
           </div>
           <div className="relative flex flex-col sm:flex-row flex-wrap gap-2.5 mt-6">
@@ -323,7 +363,7 @@ export default function DashboardPage() {
           <div>
             <div className="card-label">Wallet&apos;s Active Network</div>
             <div className="text-lg sm:text-[19px] font-bold mt-2 font-mono truncate">{network}</div>
-            <div className="text-xs text-dim mt-1.5">Balances below track all 3 chains regardless</div>
+            <div className="text-xs text-dim mt-1.5">Balances below track all {chainList.length} {networkMode} chains regardless</div>
           </div>
         </div>
 
@@ -332,9 +372,9 @@ export default function DashboardPage() {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4"><rect x="3" y="6" width="18" height="14" rx="2" /><path d="M3 10h18M8 3v3M16 3v3" /></svg>
           </div>
           <div>
-            <div className="card-label">Chains Tracked</div>
-            <div className="text-2xl sm:text-[27px] font-bold mt-2 font-mono">3</div>
-            <div className="text-xs text-dim mt-1.5">Arc · Ethereum Sepolia · Base Sepolia</div>
+            <div className="card-label">Chains Tracked · {networkMode === 'mainnet' ? 'Mainnet' : 'Testnet'}</div>
+            <div className="text-2xl sm:text-[27px] font-bold mt-2 font-mono">{chainList.length}</div>
+            <div className="text-xs text-dim mt-1.5">{chainList.map((c) => c.name).join(' · ')}</div>
           </div>
         </div>
 
@@ -377,7 +417,9 @@ export default function DashboardPage() {
           <div>
             <div className="card-label mb-3">Swap</div>
             <p className="text-sm text-dim leading-relaxed">
-              Live on Arc Testnet — swap USDC ⇄ EURC through the ArrowSwap Engine. cirBTC support coming soon.
+              {networkMode === 'mainnet'
+                ? 'Arc Mainnet is live — swap USDC ⇄ EURC through the ArrowSwap Engine once mainnet contracts are configured.'
+                : 'Live on Arc Testnet — swap USDC ⇄ EURC through the ArrowSwap Engine. cirBTC support coming soon.'}
             </p>
           </div>
           <a href="/swap" className="mt-6 text-center block bg-gradient-to-br from-indigo-bright to-indigo text-white font-bold text-[14.5px] py-[15px] rounded-[13px] shadow-glow hover:-translate-y-px transition-transform">
@@ -389,7 +431,9 @@ export default function DashboardPage() {
           <div>
             <div className="card-label mb-3">Vaults</div>
             <p className="text-sm text-dim leading-relaxed">
-              Live on Arc Testnet — stake ARROW-LP tokens to earn ARROW rewards over time. No lock period.
+              {networkMode === 'mainnet'
+                ? 'Arc Mainnet is live — stake ARROW-LP tokens once mainnet vault contracts are configured.'
+                : 'Live on Arc Testnet — stake ARROW-LP tokens to earn ARROW rewards over time. No lock period.'}
             </p>
           </div>
           <a href="/vaults" className="mt-6 text-center block bg-gradient-to-br from-indigo-bright to-indigo text-white font-bold text-[14.5px] py-[15px] rounded-[13px] shadow-glow hover:-translate-y-px transition-transform">
@@ -398,7 +442,7 @@ export default function DashboardPage() {
         </div>
 
         <div className="glass lg:col-start-1 lg:col-end-3 p-5 sm:p-7">
-          <div className="card-label mb-5">Holdings by Chain · Live</div>
+          <div className="card-label mb-5">Holdings by Chain · {networkMode === 'mainnet' ? 'Mainnet' : 'Testnet'}</div>
           {!isConnected ? (
             <div className="text-dim text-sm py-6 text-center">Connect your wallet to see real holdings.</div>
           ) : (
@@ -407,6 +451,7 @@ export default function DashboardPage() {
                 const chainBase = chainBaselineFor(chain.key);
                 const chainChange = chainBase != null ? usdcVal - chainBase : null;
                 const chainChangePct = chainBase > 0 ? (chainChange / chainBase) * 100 : chainChange != null ? 0 : null;
+                const isGated = !!row?.requiresCredentials;
 
                 return (
                   <div
@@ -416,21 +461,25 @@ export default function DashboardPage() {
                     <img
                       src={CHAIN_LOGOS[chain.key]}
                       alt={chain.name}
-                      className="w-11 h-11 rounded-full flex-shrink-0 object-cover ring-1 ring-white/5"
+                      className={`w-11 h-11 rounded-full flex-shrink-0 object-cover ring-1 ring-white/5 ${isGated ? 'opacity-40 grayscale' : ''}`}
                     />
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between gap-2">
                         <div className="font-bold text-sm truncate flex items-center gap-2">
                           {chain.name}
-                          {chainChangePct != null && <ChangeBadge change={chainChange} changePct={chainChangePct} size="sm" />}
+                          {isGated ? (
+                            <span className="text-[10.5px] font-mono font-semibold text-dim bg-white/5 px-1.5 py-0.5 rounded-full">Requires access</span>
+                          ) : (
+                            chainChangePct != null && <ChangeBadge change={chainChange} changePct={chainChangePct} size="sm" />
+                          )}
                         </div>
                         <div className="font-mono text-sm font-bold flex-shrink-0">
-                          {loading ? '…' : `${usdcVal.toLocaleString(undefined, { maximumFractionDigits: 4 })} USDC`}
+                          {isGated ? '—' : loading ? '…' : `${usdcVal.toLocaleString(undefined, { maximumFractionDigits: 4 })} USDC`}
                         </div>
                       </div>
                       <div className="flex items-center justify-between gap-2 mt-1.5">
                         <div className="text-[11px] text-dim">
-                          {row?.native ? `${parseFloat(row.native).toFixed(4)} ${row.nativeSymbol} gas` : 'native gas'}
+                          {isGated ? 'Permissioned RPC — Circle mainnet access required' : row?.native ? `${parseFloat(row.native).toFixed(4)} ${row.nativeSymbol} gas` : 'native gas'}
                         </div>
                         <a
                           href={`${chain.explorer}/address/${address}`}
@@ -441,12 +490,14 @@ export default function DashboardPage() {
                           view →
                         </a>
                       </div>
-                      <div className="w-full h-1 bg-white/5 rounded-full overflow-hidden mt-2">
-                        <div
-                          className="h-full rounded-full transition-all duration-700"
-                          style={{ width: `${Math.max(2, pct)}%`, backgroundColor: CHAIN_HEX[chain.key] }}
-                        />
-                      </div>
+                      {!isGated && (
+                        <div className="w-full h-1 bg-white/5 rounded-full overflow-hidden mt-2">
+                          <div
+                            className="h-full rounded-full transition-all duration-700"
+                            style={{ width: `${Math.max(2, pct)}%`, backgroundColor: CHAIN_HEX[chain.key] }}
+                          />
+                        </div>
+                      )}
                     </div>
                   </div>
                 );

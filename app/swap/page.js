@@ -66,9 +66,48 @@ function timeAgo(ts) {
   return `${Math.floor(s / 60)}m ago`;
 }
 
+// Testnet ↔ Mainnet pill — same look as dashboard/bridge, but Mainnet is
+// locked until swap contracts are live on Arc Mainnet.
+function NetworkModeToggle({ mode, onChange }) {
+  return (
+    <div className="inline-flex items-center rounded-full border border-white/5 bg-white/[0.02] p-0.5">
+      {['testnet', 'mainnet'].map((m) => {
+        const locked = m === 'mainnet';
+        return (
+          <button
+            key={m}
+            onClick={() => !locked && onChange(m)}
+            disabled={locked}
+            className={`px-3 py-1 rounded-full text-[10.5px] font-mono font-semibold uppercase tracking-wide transition-colors flex items-center gap-1.5 ${
+              locked
+                ? 'text-dim/50 cursor-not-allowed'
+                : mode === m
+                  ? 'bg-indigo/25 text-indigo-bright'
+                  : 'text-dim hover:text-ivory'
+            }`}
+          >
+            {m}
+            {locked && (
+              <span className="text-[8.5px] font-semibold normal-case tracking-normal bg-white/5 text-dim px-1.5 py-0.5 rounded-full">
+                Soon
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function SwapPage() {
-  const { address, isConnected, connect } = useWallet();
+  const { address, isConnected, connect, networkMode, setNetworkMode } = useWallet();
   const notify = useNotify();
+
+  // Swap only runs on Arc Testnet for now. If the shared mode was left on
+  // mainnet from another page, switch it back so the pill matches the page.
+  useEffect(() => {
+    if (networkMode === 'mainnet') setNetworkMode('testnet');
+  }, [networkMode, setNetworkMode]);
 
   const [poolState, setPoolState] = useState(null);
   const [poolUpdatedAt, setPoolUpdatedAt] = useState(null);
@@ -413,7 +452,7 @@ export default function SwapPage() {
     <AppShell>
       <div className="max-w-[520px] mx-auto">
         {/* ── Header ──────────────────────────────────────────────── */}
-        <div className="mb-6 flex items-start justify-between">
+        <div className="mb-6 flex items-start justify-between gap-3">
           <div>
             <div className="card-label mb-2 tracking-[0.16em]">Exchange</div>
             <h1 className="text-[30px] font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-ivory via-ivory to-violetglow/90">
@@ -421,13 +460,16 @@ export default function SwapPage() {
             </h1>
             <p className="text-dim text-[13px] mt-1.5">Real swaps on Arc Testnet.</p>
           </div>
-          <button
-            onClick={() => refresh()}
-            disabled={loading}
-            className="text-[11.5px] text-indigo-bright font-semibold disabled:opacity-40 hover:text-violetglow transition-colors mt-1"
-          >
-            {loading ? 'Refreshing…' : 'Refresh'}
-          </button>
+          <div className="flex flex-col items-end gap-2 flex-shrink-0">
+            <NetworkModeToggle mode="testnet" onChange={setNetworkMode} />
+            <button
+              onClick={() => refresh()}
+              disabled={loading}
+              className="text-[11.5px] text-indigo-bright font-semibold disabled:opacity-40 hover:text-violetglow transition-colors"
+            >
+              {loading ? 'Refreshing…' : 'Refresh'}
+            </button>
+          </div>
         </div>
 
         {/* Engine mode toggle — ArrowSwap Engine (direct) vs ArrowRouter (best price) */}

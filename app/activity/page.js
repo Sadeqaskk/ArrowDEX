@@ -4,12 +4,36 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import AppShell from '../../components/AppShell';
 import { useWallet } from '../../lib/WalletContext';
 import { fetchActivity } from '../../lib/activity';
-import { CHAINS } from '../../lib/chains';
+import { CHAINS, getChainList } from '../../lib/chains';
 
-const FILTERS = ['All', 'Pool', 'Vault', 'WUSDC'];
+// Testnet shows every contract we scan. Mainnet only has Bridge live right
+// now, so it gets a single Bridge filter and nothing else.
+const FILTERS_BY_MODE = {
+  testnet: ['All', 'Pool', 'Vault', 'WUSDC'],
+  mainnet: ['Bridge'],
+};
 
 function LivePulse({ ok }) {
   return <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${ok ? 'bg-success animate-pulse' : 'bg-dim/40'}`} />;
+}
+
+// Small Testnet ↔ Mainnet pill, same pattern as the dashboard and bridge.
+function NetworkModeToggle({ mode, onChange }) {
+  return (
+    <div className="inline-flex items-center rounded-full border border-white/5 bg-white/[0.02] p-0.5">
+      {['testnet', 'mainnet'].map((m) => (
+        <button
+          key={m}
+          onClick={() => onChange(m)}
+          className={`px-3 py-1 rounded-full text-[10.5px] font-mono font-semibold uppercase tracking-wide transition-colors ${
+            mode === m ? 'bg-indigo/25 text-indigo-bright' : 'text-dim hover:text-ivory'
+          }`}
+        >
+          {m}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 function timeAgo(ts) {
@@ -50,7 +74,8 @@ function groupByDay(events) {
 }
 
 export default function ActivityPage() {
-  const { address, isConnected, connect } = useWallet();
+  const { address, isConnected, connect, networkMode, setNetworkMode } = useWallet();
+  const isMainnet = networkMode === 'mainnet';
 
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -58,12 +83,36 @@ export default function ActivityPage() {
   const [filter, setFilter] = useState('All');
   const [copiedId, setCopiedId] = useState(null);
 
+  const filters = FILTERS_BY_MODE[isMainnet ? 'mainnet' : 'testnet'];
+
+  // Default explorer per mode. Bridge events that carry their own `explorer`
+  // (e.g. a tx on Ethereum) use that instead — see the tx link below.
+  const defaultExplorer = useMemo(() => {
+    if (!isMainnet) return CHAINS.arcTestnet.explorer;
+    const arcMain = getChainList('mainnet').find((c) => c.key === 'arcMainnet');
+    return arcMain?.explorer;
+  }, [isMainnet]);
+
+  const networkName = isMainnet
+    ? getChainList('mainnet').find((c) => c.key === 'arcMainnet')?.name || 'Arc Mainnet'
+    : CHAINS.arcTestnet.name;
+
+  // Switching mode swaps the whole event set and filter list — reset both so
+  // testnet events never linger on the mainnet view (or the other way round).
+  useEffect(() => {
+    setEvents([]);
+    setError(null);
+    setFilter(isMainnet ? 'Bridge' : 'All');
+  }, [isMainnet]);
+
   const refresh = useCallback(async () => {
     if (!address) return;
     setLoading(true);
     setError(null);
     try {
-      const activity = await fetchActivity(address);
+      const activity = isMainnet
+        ? (await fetchActivity(address, networkMode)).filter((e) => e.source === 'Bridge')
+        : await fetchActivity(address);
       setEvents(activity);
     } catch (err) {
       console.error(err);
@@ -71,12 +120,12 @@ export default function ActivityPage() {
     } finally {
       setLoading(false);
     }
-  }, [address]);
+  }, [address, isMainnet, networkMode]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
   const counts = useMemo(() => {
-    const c = { All: events.length, Pool: 0, Vault: 0, WUSDC: 0 };
+    const c = { All: events.length, Pool: 0, Vault: 0, WUSDC: 0, Bridge: 0 };
     for (const e of events) {
       if (c[e.source] != null) c[e.source] += 1;
     }
@@ -99,20 +148,31 @@ export default function ActivityPage() {
   return (
     <AppShell>
       <div className="max-w-[680px] mx-auto">
-        <div className="mb-6 flex items-start justify-between">
+        <div className="mb-6 flex items-start justify-between gap-3">
           <div>
             <div className="card-label mb-2 flex items-center gap-1.5"><LivePulse ok={isConnected && !error} /> On-Chain</div>
             <h1 className="text-[28px] font-bold">Activity</h1>
             <p className="text-dim text-sm mt-1.5">
-              Real transaction history, scanned directly from Arc Testnet — no explorer API, no mock data.
+              {isMainnet
+                ? 'Your Bridge transfers on Mainnet — Bridge is the only product live on Mainnet right now.'
+                : 'Real transaction history, scanned directly from Arc Testnet — no explorer API, no mock data.'}
             </p>
           </div>
-          {isConnected && (
-            <button onClick={refresh} disabled={loading} className="text-xs text-indigo-bright font-semibold disabled:opacity-40 flex-shrink-0 ml-4">
-              {loading ? 'Scanning…' : 'Refresh'}
-            </button>
-          )}
+          <div className="flex flex-col items-end gap-2 flex-shrink-0">
+            <NetworkModeToggle mode={networkMode} onChange={setNetworkMode} />
+            {isConnected && (
+              <button onClick={refresh} disabled={loading} className="text-xs text-indigo-bright font-semibold disabled:opacity-40">
+                {loading ? 'Scanning…' : 'Refresh'}
+              </button>
+            )}
+          </div>
         </div>
+
+        {isMainnet && (
+          <div className="mb-4 text-[12.5px] text-ivory bg-indigo/[0.08] border border-indigo-bright/25 rounded-[12px] px-3.5 py-2.5 leading-relaxed">
+            You&apos;re viewing real Mainnet activity. Swaps, pools and vaults will show up here once they go live on Mainnet.
+          </div>
+        )}
 
         {!isConnected ? (
           <div className="glass p-10 text-center relative overflow-hidden">
@@ -138,10 +198,12 @@ export default function ActivityPage() {
                     <div className="text-[10.5px] text-dim uppercase tracking-wide">Total events</div>
                     <div className="font-mono text-lg font-bold mt-0.5">{events.length}</div>
                   </div>
-                  <div>
-                    <div className="text-[10.5px] text-dim uppercase tracking-wide">Rewards claimed</div>
-                    <div className="font-mono text-lg font-bold mt-0.5 text-success">{positiveCount}</div>
-                  </div>
+                  {!isMainnet && (
+                    <div>
+                      <div className="text-[10.5px] text-dim uppercase tracking-wide">Rewards claimed</div>
+                      <div className="font-mono text-lg font-bold mt-0.5 text-success">{positiveCount}</div>
+                    </div>
+                  )}
                   <div>
                     <div className="text-[10.5px] text-dim uppercase tracking-wide">Last activity</div>
                     <div className="font-mono text-sm font-bold mt-0.5">{lastActivity || '—'}</div>
@@ -151,7 +213,7 @@ export default function ActivityPage() {
             )}
 
             <div className="flex gap-2 mb-5 flex-wrap">
-              {FILTERS.map((f) => (
+              {filters.map((f) => (
                 <button
                   key={f}
                   onClick={() => setFilter(f)}
@@ -188,7 +250,11 @@ export default function ActivityPage() {
                   <div className="w-11 h-11 rounded-full bg-white/5 text-dim flex items-center justify-center mx-auto mb-3">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5"><circle cx="12" cy="12" r="9" /><path d="M9 12l2 2 4-4" /></svg>
                   </div>
-                  <div className="text-dim text-sm">No {filter !== 'All' ? filter.toLowerCase() : ''} activity found for this wallet yet.</div>
+                  <div className="text-dim text-sm">
+                    {isMainnet
+                      ? 'No bridge activity found for this wallet on Mainnet yet.'
+                      : `No ${filter !== 'All' ? filter.toLowerCase() : ''} activity found for this wallet yet.`}
+                  </div>
                 </div>
               ) : (
                 grouped.map((group) => (
@@ -203,7 +269,7 @@ export default function ActivityPage() {
                           className="group flex items-center justify-between gap-3 px-5 py-4 hover:bg-white/[0.02] transition-colors"
                         >
                           <a
-                            href={`${CHAINS.arcTestnet.explorer}/tx/${e.transactionHash}`}
+                            href={`${e.explorer || defaultExplorer}/tx/${e.transactionHash}`}
                             target="_blank"
                             rel="noreferrer"
                             className="flex items-center gap-3 flex-1 min-w-0"
@@ -240,9 +306,9 @@ export default function ActivityPage() {
             </div>
 
             <p className="text-[11px] text-dim mt-5 leading-relaxed">
-              Scanned live from {CHAINS.arcTestnet.name} via public RPC — covers Pool, Vault, and WUSDC contract
-              events tied to your address. Very old activity could be missed if the chain grows beyond what a
-              single log query can cover in one call.
+              {isMainnet
+                ? `Bridge transfers tied to your address on ${networkName}. Other products will appear here once they launch on Mainnet.`
+                : `Scanned live from ${networkName} via public RPC — covers Pool, Vault, and WUSDC contract events tied to your address. Very old activity could be missed if the chain grows beyond what a single log query can cover in one call.`}
             </p>
           </>
         )}
@@ -266,6 +332,12 @@ function EventIcon({ eventName }) {
       return <svg {...common}><path d="M7 16V4M7 4L3 8M7 4l4 4M17 8v12M17 20l4-4M17 20l-4-4" /></svg>;
     case 'RewardPaid':
       return <svg {...common}><path d="M12 2l3 7h7l-5.5 4.5L18.5 21 12 16.5 5.5 21l2-7.5L2 9h7z" /></svg>;
+    case 'Bridge':
+    case 'BridgeMint':
+    case 'BridgeBurn':
+    case 'DepositForBurn':
+    case 'MessageReceived':
+      return <svg {...common}><path d="M3 17h18M6 17V9m12 8V9M3 9h18M12 9v8" /></svg>;
     default:
       return <svg {...common}><circle cx="12" cy="12" r="9" /></svg>;
   }

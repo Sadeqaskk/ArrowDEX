@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { createChart, CandlestickSeries, HistogramSeries, ColorType } from 'lightweight-charts';
 import { getSupabaseBrowser } from '@/lib/supabase/browser';
 import { PAIRS, INTERVALS } from '@/lib/chartConfig';
+import { useWallet } from '@/lib/WalletContext';
 
 const THEME = {
   bg: '#0A0A10',
@@ -81,7 +82,48 @@ async function fetchCandles(pool, interval, limit) {
   }
 }
 
+// Testnet ↔ Mainnet pill — same look as the other pages, but Mainnet is
+// locked until the chart has Arc Mainnet pools to read from.
+function NetworkModeToggle({ mode, onChange }) {
+  return (
+    <div className="inline-flex items-center rounded-full border border-white/5 bg-white/[0.02] p-0.5">
+      {['testnet', 'mainnet'].map((m) => {
+        const locked = m === 'mainnet';
+        return (
+          <button
+            key={m}
+            onClick={() => !locked && onChange(m)}
+            disabled={locked}
+            className={`px-3 py-1 rounded-full text-[10.5px] font-mono font-semibold uppercase tracking-wide transition-colors flex items-center gap-1.5 ${
+              locked
+                ? 'text-dim/50 cursor-not-allowed'
+                : mode === m
+                  ? 'bg-indigo/25 text-indigo-bright'
+                  : 'text-dim hover:text-ivory'
+            }`}
+          >
+            {m}
+            {locked && (
+              <span className="text-[8.5px] font-semibold normal-case tracking-normal bg-white/5 text-dim px-1.5 py-0.5 rounded-full">
+                Soon
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function TradingChart() {
+  const { networkMode, setNetworkMode } = useWallet();
+
+  // The chart only reads Arc Testnet pools for now. If the shared mode was
+  // left on mainnet from another page, switch it back so the pill matches.
+  useEffect(() => {
+    if (networkMode === 'mainnet') setNetworkMode('testnet');
+  }, [networkMode, setNetworkMode]);
+
   const [pair, setPair] = useState(PAIRS[0]);
   const [interval, setIntervalKey] = useState('1h');
   const [lastPrice, setLastPrice] = useState(null);
@@ -340,7 +382,9 @@ export default function TradingChart() {
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
+          <NetworkModeToggle mode="testnet" onChange={setNetworkMode} />
+
           <div className="flex items-center gap-1.5 text-[11px] font-mono">
             <span
               className={`w-1.5 h-1.5 rounded-full ${
@@ -406,4 +450,4 @@ export default function TradingChart() {
       </div>
     </div>
   );
-} 
+}

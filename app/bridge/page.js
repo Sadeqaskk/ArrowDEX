@@ -1,11 +1,11 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import AppShell from '../../components/AppShell';
 import Modal from '../../components/Modal';
 import PremiumSelector from '../../components/PremiumSelector';
 import { useWallet } from '../../lib/WalletContext';
-import { CHAINS, CHAIN_LIST } from '../../lib/chains';
+import { getChainList } from '../../lib/chains';
 import { runBridge } from '../../lib/cctp';
 import { useRealBalances } from '../../lib/useBalances';
 import { useNotify } from '../../components/NotificationProvider';
@@ -21,29 +21,37 @@ const CHAIN_COLORS = {
   arcTestnet: 'from-[#8B7FFF] to-[#4d3fc9]',
   ethereumSepolia: 'from-[#4D8AFF] to-[#2f5fc9]',
   baseSepolia: 'from-[#5FE0A8] to-[#2f9e7c]',
+  arcMainnet: 'from-[#8B7FFF] to-[#4d3fc9]',
+  ethereumMainnet: 'from-[#4D8AFF] to-[#2f5fc9]',
+  baseMainnet: 'from-[#5FE0A8] to-[#2f9e7c]',
 };
 
 const CHAIN_LOGOS = {
   arcTestnet: '/fonts/chains/arc.png',
   ethereumSepolia: '/fonts/chains/ethereum.png',
   baseSepolia: '/fonts/chains/base.png',
+  arcMainnet: '/fonts/chains/arc.png',
+  ethereumMainnet: '/fonts/chains/ethereum.png',
+  baseMainnet: '/fonts/chains/base.png',
 };
 
-const CHAIN_OPTIONS = CHAIN_LIST.map((c) => ({
-  key: c.key,
-  label: c.name,
-  sublabel: c.key === 'arcTestnet' ? 'USDC is native gas' : 'USDC + ETH gas',
-  colorClass: CHAIN_COLORS[c.key],
-  logo: CHAIN_LOGOS[c.key],
-}));
+// Default source/dest pair per mode — must be two keys that actually exist
+// in that mode's chain list, or sourceChain/destChain below resolve to
+// undefined and everything downstream (explorer links, chain.name, etc.)
+// breaks. Keep these in sync with lib/chains.js's key names.
+const DEFAULT_PAIR = {
+  testnet: { source: 'ethereumSepolia', dest: 'arcTestnet' },
+  mainnet: { source: 'ethereumMainnet', dest: 'arcMainnet' },
+};
 
 // Below this, we treat a destination chain's gas balance as "not enough to mint".
-// Mints on Sepolia/Base Sepolia are cheap, so this is a conservative trip-wire.
+// Mainnet mint gas costs real money and vary by chain, so this is deliberately
+// conservative for both modes — it's a trip-wire, not a precise estimate.
 const LOW_GAS_THRESHOLD = 0.0005;
 
-// On Arc, the "USDC" balance IS the native gas balance — bridging 100% of it
-// would leave nothing to pay for the burn transaction itself, so MAX leaves
-// this much behind.
+// When the source chain's native gas token IS the USDC being bridged (Arc),
+// MAX leaves this much behind so there's still something to pay for the burn
+// transaction itself.
 const ARC_GAS_BUFFER = 0.01;
 
 function fmtBal(v, maxDecimals = 4) {
@@ -53,18 +61,53 @@ function fmtBal(v, maxDecimals = 4) {
   return num.toLocaleString(undefined, { maximumFractionDigits: num < 1 ? 6 : maxDecimals });
 }
 
+// Small Testnet ↔ Mainnet pill, same pattern as the dashboard's toggle.
+function NetworkModeToggle({ mode, onChange }) {
+  return (
+    <div className="inline-flex items-center rounded-full border border-white/5 bg-white/[0.02] p-0.5">
+      {['testnet', 'mainnet'].map((m) => (
+        <button
+          key={m}
+          onClick={() => onChange(m)}
+          className={`px-3 py-1 rounded-full text-[10.5px] font-mono font-semibold uppercase tracking-wide transition-colors ${
+            mode === m ? 'bg-indigo/25 text-indigo-bright' : 'text-dim hover:text-ivory'
+          }`}
+        >
+          {m}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export default function BridgePage() {
-  const { address, isConnected, connect } = useWallet();
+  const { address, isConnected, connect, networkMode, setNetworkMode } = useWallet();
   const notify = useNotify();
+
+  const chainList = getChainList(networkMode);
+  // Keyed lookup for this mode's chains — replaces the old testnet-only
+  // `CHAINS` import so sourceChain/destChain always resolve to a chain that
+  // actually belongs to the currently selected mode.
+  const CHAINS_BY_KEY = Object.fromEntries(chainList.map((c) => [c.key, c]));
+
+  const CHAIN_OPTIONS = chainList.map((c) => ({
+    key: c.key,
+    label: c.name,
+    sublabel: c.nativeIsUsdc ? 'USDC is native gas' : 'USDC + ETH gas',
+    colorClass: CHAIN_COLORS[c.key],
+    logo: CHAIN_LOGOS[c.key],
+    disabled: c.requiresCredentials,
+  }));
+
   const {
     balances,
     loading: balancesLoading,
     error: balancesError,
     refetch: refreshBalances,
-  } = useRealBalances(address);
+  } = useRealBalances(address, networkMode);
 
-  const [sourceKey, setSourceKey] = useState('ethereumSepolia');
-  const [destKey, setDestKey] = useState('arcTestnet');
+  const [sourceKey, setSourceKey] = useState(DEFAULT_PAIR.testnet.source);
+  const [destKey, setDestKey] = useState(DEFAULT_PAIR.testnet.dest);
   const [amount, setAmount] = useState('1');
 
   const [modalOpen, setModalOpen] = useState(false);
@@ -75,10 +118,26 @@ export default function BridgePage() {
   const [txHashes, setTxHashes] = useState({});
   const [complete, setComplete] = useState(false);
 
-  const sourceChain = CHAINS[sourceKey];
-  const destChain = CHAINS[destKey];
+  // Switching mode changes the whole set of valid chain keys — reset to that
+  // mode's default pair rather than carrying over a key (e.g.
+  // 'ethereumSepolia') that doesn't exist in the other mode's list.
+  useEffect(() => {
+    const pair = DEFAULT_PAIR[networkMode] || DEFAULT_PAIR.testnet;
+    setSourceKey(pair.source);
+    setDestKey(pair.dest);
+    setAmount('1');
+  }, [networkMode]);
+
+  const sourceChain = CHAINS_BY_KEY[sourceKey];
+  const destChain = CHAINS_BY_KEY[destKey];
   const sourceBalance = balances[sourceKey];
   const destBalance = balances[destKey];
+
+  // Guard against a render where mode just switched and state hasn't caught
+  // up yet (see effect above) — avoids sourceChain.name crashing mid-flicker.
+  if (!sourceChain || !destChain) {
+    return <AppShell><div className="max-w-[560px] mx-auto text-dim text-sm py-10 text-center">Loading chains…</div></AppShell>;
+  }
 
   function flipChains() {
     const s = sourceKey;
@@ -89,7 +148,7 @@ export default function BridgePage() {
 
   function setMax() {
     if (!sourceBalance?.usdc) return;
-    if (sourceKey === 'arcTestnet') {
+    if (sourceChain.nativeIsUsdc) {
       const avail = Math.max(parseFloat(sourceBalance.usdc) - ARC_GAS_BUFFER, 0);
       setAmount(avail.toString());
     } else {
@@ -118,6 +177,12 @@ export default function BridgePage() {
         destinationChain: destChain,
         account: address,
         amount: amountSubunits,
+        // cctp.js needs this to pick Circle's sandbox vs production
+        // attestation (Iris) endpoint — a mainnet burn polled against the
+        // sandbox API will never get attested. If runBridge doesn't yet
+        // accept/use this param, it needs updating before mainnet bridging
+        // is safe to use for real.
+        networkMode,
         onStatus: ({ step, status, hash, message }) => {
           setStepStatus((prev) => ({ ...prev, [step]: status }));
           if (hash) {
@@ -153,10 +218,13 @@ export default function BridgePage() {
     destBalance.native !== undefined &&
     parseFloat(destBalance.native) < LOW_GAS_THRESHOLD;
 
+  const sourceGated = !!sourceChain.requiresCredentials;
+  const destGated = !!destChain.requiresCredentials;
+
   return (
     <AppShell>
       <div className="max-w-[560px] mx-auto">
-        <div className="mb-8 flex items-start justify-between">
+        <div className="mb-8 flex items-start justify-between gap-3">
           <div>
             <div className="card-label mb-2">Cross-Chain</div>
             <h1 className="text-[28px] font-bold">Bridge USDC</h1>
@@ -164,20 +232,39 @@ export default function BridgePage() {
               Powered by Circle&apos;s CCTP — native burn-and-mint, no wrapped tokens.
             </p>
           </div>
-          {isConnected && (
-            <button
-              onClick={refreshBalances}
-              disabled={balancesLoading}
-              className="text-xs text-indigo-bright font-semibold disabled:opacity-40 mt-1"
-            >
-              {balancesLoading ? 'Refreshing…' : 'Refresh'}
-            </button>
-          )}
+          <div className="flex flex-col items-end gap-2 flex-shrink-0">
+            <NetworkModeToggle mode={networkMode} onChange={setNetworkMode} />
+            {isConnected && (
+              <button
+                onClick={refreshBalances}
+                disabled={balancesLoading}
+                className="text-xs text-indigo-bright font-semibold disabled:opacity-40"
+              >
+                {balancesLoading ? 'Refreshing…' : 'Refresh'}
+              </button>
+            )}
+          </div>
         </div>
+
+        {networkMode === 'mainnet' && (
+          <div className="mb-4 text-[12.5px] text-ivory bg-indigo/[0.08] border border-indigo-bright/25 rounded-[12px] px-3.5 py-2.5 leading-relaxed">
+            You&apos;re bridging real USDC on Mainnet. CCTP burns are irreversible — double-check the
+            source, destination, and amount before confirming in your wallet.
+          </div>
+        )}
 
         {balancesError && (
           <div className="mb-4 text-[13px] text-danger bg-danger/10 border border-danger/25 rounded-[12px] px-3.5 py-2.5">
             {balancesError}
+          </div>
+        )}
+
+        {(sourceGated || destGated) && (
+          <div className="mb-4 text-[12.5px] text-dim bg-white/[0.02] border border-white/5 rounded-[12px] px-3.5 py-2.5 leading-relaxed">
+            {[sourceGated && sourceChain.name, destGated && destChain.name].filter(Boolean).join(' and ')}{' '}
+            {sourceGated && destGated ? 'are' : 'is'} in Circle&apos;s private mainnet phase — bridging
+            to/from {sourceGated && destGated ? 'either' : 'that chain'} isn&apos;t available until RPC
+            access is granted.
           </div>
         )}
 
@@ -251,9 +338,10 @@ export default function BridgePage() {
             )}
           </div>
 
-          {(sourceKey === 'arcTestnet' || destKey === 'arcTestnet') && (
+          {(sourceChain.nativeIsUsdc || destChain.nativeIsUsdc) && (
             <p className="text-[11.5px] text-dim mt-4 leading-relaxed">
-              Arc Testnet uses USDC as its native gas token — there&apos;s no separate ERC-20 contract to approve when Arc is the source chain.
+              {sourceChain.nativeIsUsdc ? sourceChain.name : destChain.name} uses USDC as its native gas
+              token — there&apos;s no separate ERC-20 contract to approve when it&apos;s the source chain.
             </p>
           )}
 
@@ -275,7 +363,7 @@ export default function BridgePage() {
           ) : (
             <button
               onClick={openBridgeModal}
-              disabled={!amount || parseFloat(amount) <= 0}
+              disabled={!amount || parseFloat(amount) <= 0 || sourceGated || destGated}
               className="w-full mt-6 bg-gradient-to-br from-indigo-bright to-indigo text-white font-bold text-[15px] py-4 rounded-[14px] shadow-glow disabled:opacity-40 disabled:cursor-not-allowed"
             >
               Start Bridge
@@ -284,14 +372,26 @@ export default function BridgePage() {
         </div>
 
         <div className="mt-6 text-[12px] text-dim leading-relaxed">
-          <strong className="text-ivory">Before you bridge:</strong> you&apos;ll need testnet USDC and
-          native gas on the source chain to approve and burn, <strong className="text-ivory">and</strong> a
-          small amount of native gas on the destination chain to complete the mint. Get testnet USDC and
-          ETH from{' '}
-          <a href="https://faucet.circle.com" target="_blank" rel="noreferrer" className="text-indigo-bright">
-            faucet.circle.com
-          </a>.
-          {' '}Fast Transfers typically attest in under a minute.
+          {networkMode === 'mainnet' ? (
+            <>
+              <strong className="text-ivory">Before you bridge:</strong> you&apos;ll need real USDC and
+              native gas on the source chain to approve and burn, <strong className="text-ivory">and</strong>{' '}
+              a small amount of native gas on the destination chain to complete the mint. Fast Transfers
+              typically attest in under a minute, but always confirm the mint on the destination
+              chain&apos;s explorer before assuming funds have arrived.
+            </>
+          ) : (
+            <>
+              <strong className="text-ivory">Before you bridge:</strong> you&apos;ll need testnet USDC and
+              native gas on the source chain to approve and burn, <strong className="text-ivory">and</strong> a
+              small amount of native gas on the destination chain to complete the mint. Get testnet USDC and
+              ETH from{' '}
+              <a href="https://faucet.circle.com" target="_blank" rel="noreferrer" className="text-indigo-bright">
+                faucet.circle.com
+              </a>.
+              {' '}Fast Transfers typically attest in under a minute.
+            </>
+          )}
         </div>
       </div>
 

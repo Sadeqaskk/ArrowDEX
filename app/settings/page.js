@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import AppShell from '../../components/AppShell';
 import { useWallet } from '../../lib/WalletContext';
-import { CHAINS, CHAIN_LIST } from '../../lib/chains';
+import { CHAINS, getChainList } from '../../lib/chains';
 import { ensureChain } from '../../lib/cctp';
 import { getPreferences, savePreferences, useNotify } from '../../components/NotificationProvider';
 import DesktopModeToggle from '../../components/DesktopModeToggle';
@@ -15,8 +15,27 @@ const PREVIEW_EVENTS = [
   { type: 'claim', title: 'Claimed 6.18 ARROW', message: 'Rewards sent to your wallet' },
 ];
 
+// Testnet ↔ Mainnet pill, same pattern as the Bridge page and dashboard.
+function NetworkModeToggle({ mode, onChange }) {
+  return (
+    <div className="inline-flex items-center rounded-full border border-white/5 bg-white/[0.02] p-0.5 flex-shrink-0">
+      {['testnet', 'mainnet'].map((m) => (
+        <button
+          key={m}
+          onClick={() => onChange(m)}
+          className={`px-3 py-1 rounded-full text-[10.5px] font-mono font-semibold uppercase tracking-wide transition-colors ${
+            mode === m ? 'bg-indigo/25 text-indigo-bright' : 'text-dim hover:text-ivory'
+          }`}
+        >
+          {m}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export default function SettingsPage() {
-  const { address, isConnected, connect, disconnect, chainId, network, currentChain } = useWallet();
+  const { address, isConnected, connect, disconnect, chainId, network, currentChain, networkMode, setNetworkMode } = useWallet();
   const notify = useNotify();
 
   const [notifications, setNotifications] = useState(true);
@@ -68,6 +87,11 @@ export default function SettingsPage() {
     } finally {
       setSwitching(null);
     }
+  }
+
+  function handleModeChange(mode) {
+    setSwitchError(null);
+    setNetworkMode(mode);
   }
 
   const permissionMeta = {
@@ -134,10 +158,15 @@ export default function SettingsPage() {
         </div>
 
         <div className="glass p-5 sm:p-7 mb-5 hover:border-indigo-bright/20 border border-transparent transition-colors">
-          <div className="card-label mb-1">Networks</div>
-          <p className="text-xs text-dim mb-4">Switch your wallet&apos;s active network directly from here.</p>
+          <div className="flex items-start justify-between gap-3 mb-4">
+            <div className="min-w-0">
+              <div className="card-label mb-1">Networks</div>
+              <p className="text-xs text-dim">Switch your wallet&apos;s active network directly from here.</p>
+            </div>
+            <NetworkModeToggle mode={networkMode} onChange={handleModeChange} />
+          </div>
           <div className="space-y-2.5">
-            {CHAIN_LIST.map((chain) => {
+            {getChainList(networkMode).map((chain) => {
               const isActive = chainId === chain.chainId;
               return (
                 <div key={chain.key} className="flex items-center justify-between p-4 bg-white/[0.02] border border-white/5 rounded-[14px] gap-3">
