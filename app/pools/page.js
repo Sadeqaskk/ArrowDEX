@@ -54,7 +54,7 @@ const POOL_OPTIONS = [
 const MAINNET_TOKEN_LOGOS = {
   USDC: '/fonts/tokens/usdc.png',
   EURC: '/fonts/tokens/eurc.png',
-  cirBTC: '/fonts/tokens/cirbtc.png',
+  cirBTC: '/fonts/tokens/cirBTC.png',
 };
 
 // Mainnet pool picker options, built from MAINNET_POOLS_V4 so the selector
