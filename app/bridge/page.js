@@ -6,7 +6,7 @@ import Modal from '../../components/Modal';
 import PremiumSelector from '../../components/PremiumSelector';
 import { useWallet } from '../../lib/WalletContext';
 import { getChainList } from '../../lib/chains';
-import { runBridge } from '../../lib/cctp';
+import { runBridge, completeMint } from '../../lib/cctp';
 import { useRealBalances } from '../../lib/useBalances';
 import { useNotify } from '../../components/NotificationProvider';
 
@@ -117,6 +117,8 @@ export default function BridgePage() {
   const [error, setError] = useState(null);
   const [txHashes, setTxHashes] = useState({});
   const [complete, setComplete] = useState(false);
+  const [resumeHash, setResumeHash] = useState('');
+  const [resuming, setResuming] = useState(false);
 
   // Switching mode changes the whole set of valid chain keys — reset to that
   // mode's default pair rather than carrying over a key (e.g.
@@ -161,6 +163,7 @@ export default function BridgePage() {
     setStepStatus({});
     setTxHashes({});
     setComplete(false);
+    setResuming(false);
     setStatusMessage('');
     setModalOpen(true);
     handleBridge();
@@ -179,9 +182,7 @@ export default function BridgePage() {
         amount: amountSubunits,
         // cctp.js needs this to pick Circle's sandbox vs production
         // attestation (Iris) endpoint — a mainnet burn polled against the
-        // sandbox API will never get attested. If runBridge doesn't yet
-        // accept/use this param, it needs updating before mainnet bridging
-        // is safe to use for real.
+        // sandbox API will never get attested.
         networkMode,
         onStatus: ({ step, status, hash, message }) => {
           setStepStatus((prev) => ({ ...prev, [step]: status }));
@@ -204,6 +205,57 @@ export default function BridgePage() {
     } catch (err) {
       console.error(err);
       setError(err.message || 'Bridge failed — see browser console for details.');
+    } finally {
+      setRunning(false);
+      refreshBalances();
+    }
+  }
+
+  // Finish an interrupted bridge: the burn already succeeded on the source
+  // chain, so we only fetch the attestation and run the mint.
+  async function handleResume() {
+    const hash = resumeHash.trim();
+    if (!hash) return;
+
+    setError(null);
+    setComplete(false);
+    setStatusMessage('');
+    setResuming(true);
+    setStepStatus({ approve: 'done', burn: 'done' });
+    setTxHashes({ burn: hash });
+    setModalOpen(true);
+    setRunning(true);
+
+    try {
+      let mintHash = null;
+      await completeMint({
+        sourceChain,
+        destinationChain: destChain,
+        account: address,
+        burnHash: hash,
+        networkMode,
+        onStatus: ({ step, status, hash: h, message }) => {
+          setStepStatus((prev) => ({ ...prev, [step]: status }));
+          if (h) {
+            setTxHashes((prev) => ({ ...prev, [step]: h }));
+            if (step === 'mint') mintHash = h;
+          }
+          if (message) setStatusMessage(message);
+        },
+      });
+
+      setComplete(true);
+      setStatusMessage('Mint complete.');
+      setResumeHash('');
+      notify({
+        type: 'bridge',
+        title: 'Bridge completed',
+        message: `${sourceChain.name} → ${destChain.name}`,
+        txHash: mintHash,
+      });
+    } catch (err) {
+      console.error(err);
+      setError(err.message || 'Mint failed — see browser console for details.');
     } finally {
       setRunning(false);
       refreshBalances();
@@ -333,7 +385,6 @@ export default function BridgePage() {
                 className={`text-right text-[10.5px] mt-1.5 font-mono ${destGasLow ? 'text-danger' : 'text-dim'}`}
               >
                 {fmtBal(destBalance.native, 5)} {destBalance.nativeSymbol} for gas
-                {destGasLow ? ' — may not be enough to complete the mint' : ''}
               </div>
             )}
           </div>
@@ -371,6 +422,29 @@ export default function BridgePage() {
           )}
         </div>
 
+        {isConnected && (
+          <div className="mt-6 bg-white/[0.02] border border-white/5 rounded-[12px] p-4">
+            <div className="text-[12px] text-ivory font-semibold mb-2">Finish an interrupted bridge</div>
+            <p className="text-[11.5px] text-dim mb-3 leading-relaxed">
+              Already burned your USDC but the mint didn&apos;t finish? Select the same source and
+              destination chains above, then paste the burn transaction hash from the source chain.
+            </p>
+            <input
+              value={resumeHash}
+              onChange={(e) => setResumeHash(e.target.value)}
+              placeholder="0x… burn tx hash"
+              className="w-full bg-transparent border border-white/10 rounded-lg px-3 py-2 text-xs font-mono text-ivory outline-none mb-3"
+            />
+            <button
+              onClick={handleResume}
+              disabled={!resumeHash.trim() || running || sourceGated || destGated}
+              className="w-full bg-white/5 border border-white/10 text-ivory font-semibold text-[13px] py-2.5 rounded-[10px] disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Complete Mint
+            </button>
+          </div>
+        )}
+
         <div className="mt-6 text-[12px] text-dim leading-relaxed">
           {networkMode === 'mainnet' ? (
             <>
@@ -400,7 +474,11 @@ export default function BridgePage() {
         <div className="mb-6">
           <div className="card-label mb-2">{complete ? 'Complete' : running ? 'In Progress' : 'Bridge'}</div>
           <h2 className="text-xl font-bold">
-            {complete ? 'Bridge Successful' : `Bridging ${amount} USDC`}
+            {complete
+              ? 'Bridge Successful'
+              : resuming
+              ? 'Finishing your bridge'
+              : `Bridging ${amount} USDC`}
           </h2>
           <p className="text-dim text-sm mt-1">
             {sourceChain.name} → {destChain.name}
@@ -410,6 +488,8 @@ export default function BridgePage() {
         <div className="space-y-4">
           {STEPS.map((s) => {
             const status = stepStatus[s.key];
+            // Mint tx lives on the destination chain; every other step is on the source chain.
+            const explorer = s.key === 'mint' ? destChain.explorer : sourceChain.explorer;
             return (
               <div key={s.key} className="flex items-center gap-3">
                 <div
@@ -427,8 +507,8 @@ export default function BridgePage() {
                 </div>
                 <span className={`text-sm ${status ? 'text-ivory font-medium' : 'text-dim'}`}>{s.label}</span>
                 {txHashes[s.key] && (
-                 <a                 
-                    href={`${sourceChain.explorer}/tx/${txHashes[s.key]}`}
+                  <a
+                    href={`${explorer}/tx/${txHashes[s.key]}`}
                     target="_blank"
                     rel="noreferrer"
                     className="text-xs text-indigo-bright ml-auto font-mono"

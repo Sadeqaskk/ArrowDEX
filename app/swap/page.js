@@ -8,6 +8,21 @@ import { useWallet } from '../../lib/WalletContext';
 import { TOKENS, findPool } from '../../lib/swapConfig';
 import { getPoolState, quoteSwap, executeSwap } from '../../lib/swap';
 import { getBestRoute, executeRouterSwap } from '../../lib/arrowRouterClient';
+import {
+  MAINNET_TOKENS,
+  MAINNET_READY,
+  ARROW_FEE_ROUTER,
+  mainnetExplorerTx,
+  mainnetExplorerAddr,
+  getMainnetBalances,
+  readFeeBps,
+  splitFee,
+  parseAmount,
+  formatRaw,
+  computeSpendable,
+  getUniQuote,
+  executeUniSwap,
+} from '../../lib/kyberMainnet';
 import { useNotify } from '../../components/NotificationProvider';
 
 // ── Config ──────────────────────────────────────────────────────────────
@@ -66,13 +81,13 @@ function timeAgo(ts) {
   return `${Math.floor(s / 60)}m ago`;
 }
 
-// Testnet ↔ Mainnet pill — same look as dashboard/bridge, but Mainnet is
-// locked until swap contracts are live on Arc Mainnet.
-function NetworkModeToggle({ mode, onChange }) {
+// Testnet ↔ Mainnet pill — same look as dashboard/bridge. Mainnet stays locked
+// on "Soon" until the Arc Mainnet swap contracts are configured (mainnetReady).
+function NetworkModeToggle({ mode, onChange, mainnetReady = false }) {
   return (
     <div className="inline-flex items-center rounded-full border border-white/5 bg-white/[0.02] p-0.5">
       {['testnet', 'mainnet'].map((m) => {
-        const locked = m === 'mainnet';
+        const locked = m === 'mainnet' && !mainnetReady;
         return (
           <button
             key={m}
@@ -103,10 +118,14 @@ export default function SwapPage() {
   const { address, isConnected, connect, networkMode, setNetworkMode } = useWallet();
   const notify = useNotify();
 
-  // Swap only runs on Arc Testnet for now. If the shared mode was left on
-  // mainnet from another page, switch it back so the pill matches the page.
+  // Mainnet (ArrowRoute, via KyberSwap's aggregator) is only active once lib/kyberMainnet.js is configured.
+  // Until then this page behaves exactly like the testnet-only version.
+  const isMainnet = networkMode === 'mainnet' && MAINNET_READY;
+
+  // If the shared mode was left on mainnet from another page but mainnet swaps
+  // aren't configured yet, switch it back so the pill matches the page.
   useEffect(() => {
-    if (networkMode === 'mainnet') setNetworkMode('testnet');
+    if (networkMode === 'mainnet' && !MAINNET_READY) setNetworkMode('testnet');
   }, [networkMode, setNetworkMode]);
 
   const [poolState, setPoolState] = useState(null);
@@ -136,13 +155,22 @@ export default function SwapPage() {
   const [engineOpen, setEngineOpen] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  // ── Router mode ─────────────────────────────────────────────────────
+  // ── Router mode (testnet) ───────────────────────────────────────────
   // 'direct'  -> unchanged existing behavior, calls lib/swap.js directly
   // 'router'  -> quotes/executes through the deployed ArrowRouter contract
   const [engineMode, setEngineMode] = useState('direct');
   const [route, setRoute] = useState(null);
   const [routeLoading, setRouteLoading] = useState(false);
   const routeRequestId = useRef(0);
+
+  // ── Mainnet (ArrowRoute) state ───────────────────────────────────────
+  const [mainnetBalances, setMainnetBalances] = useState(null); // { USDC: '1.23', ... }
+  const [feeBps, setFeeBps] = useState(null); // ArrowDEX fee, read from the fee router
+  const [feeError, setFeeError] = useState(false);
+  const [uniQuote, setUniQuote] = useState(null);
+  const [uniLoading, setUniLoading] = useState(false);
+  const [uniError, setUniError] = useState(null);
+  const uniRequestId = useRef(0);
 
   // Impact confirmation gate
   const [impactAck, setImpactAck] = useState(false);
@@ -154,25 +182,83 @@ export default function SwapPage() {
   const [modalDone, setModalDone] = useState(false);
   const [txHash, setTxHash] = useState(null);
 
-  const payTokenData = TOKENS.find((t) => t.symbol === payToken);
-  const receiveTokenData = TOKENS.find((t) => t.symbol === receiveToken);
-  const pool = findPool(payToken, receiveToken); // null = no direct pool for this pair
+  const tokenList = isMainnet ? MAINNET_TOKENS : TOKENS;
+  const payTokenData = tokenList.find((t) => t.symbol === payToken);
+  const receiveTokenData = tokenList.find((t) => t.symbol === receiveToken);
+  const pool = isMainnet ? null : findPool(payToken, receiveToken); // null = no direct pool for this pair
 
-  const payBalance = poolState ? poolState.balancesFormatted[payToken] : null;
-  const receiveBalance = poolState ? poolState.balancesFormatted[receiveToken] : null;
+  const payBalance = isMainnet
+    ? (mainnetBalances ? mainnetBalances[payToken] : null)
+    : (poolState ? poolState.balancesFormatted[payToken] : null);
+  const receiveBalance = isMainnet
+    ? (mainnetBalances ? mainnetBalances[receiveToken] : null)
+    : (poolState ? poolState.balancesFormatted[receiveToken] : null);
 
-  const engineAddress = pool?.address || pool?.contractAddress || pool?.poolAddress || null;
+  const engineAddress = isMainnet
+    ? ARROW_FEE_ROUTER
+    : (pool?.address || pool?.contractAddress || pool?.poolAddress || null);
+  const engineName = isMainnet
+    ? 'ArrowRoute'
+    : engineMode === 'router' ? 'ArrowRouter' : 'ArrowSwap Engine';
+  const explorerTx = isMainnet ? mainnetExplorerTx : EXPLORER_TX;
+  const explorerAddr = isMainnet ? mainnetExplorerAddr : EXPLORER_ADDR;
+  // cirBTC has 8 decimals — show more precision than the default 4 (mainnet only).
+  const balDigits = (sym) => (isMainnet && sym === 'cirBTC' ? 8 : 4);
+  const feePctLabel = feeBps != null ? `${(feeBps / 100).toFixed(2)}%` : '—';
 
   const filteredTokens = useMemo(() => {
-    if (!pickerQuery.trim()) return TOKENS;
+    if (!pickerQuery.trim()) return tokenList;
     const q = pickerQuery.trim().toLowerCase();
-    return TOKENS.filter((t) => t.symbol.toLowerCase().includes(q) || t.name?.toLowerCase().includes(q));
-  }, [pickerQuery]);
+    return tokenList.filter((t) => t.symbol.toLowerCase().includes(q) || t.name?.toLowerCase().includes(q));
+  }, [pickerQuery, tokenList]);
 
   const effectiveSlippage = customSlippage !== '' ? parseFloat(customSlippage) || 0 : slippage;
+  const slipBps = Math.min(Math.max(Math.round((effectiveSlippage || 0) * 100), 0), 5000);
+
+  // Switching network resets the form and clears anything from the other network.
+  useEffect(() => {
+    setPayToken('USDC');
+    setReceiveToken('EURC');
+    setPayAmount('');
+    setReceiveAmount('0.00');
+    setPickerOpen(null);
+    setPickerQuery('');
+    setPoolState(null);
+    setMainnetBalances(null);
+    setRoute(null);
+    setUniQuote(null);
+    setUniError(null);
+    setError(null);
+  }, [isMainnet]);
 
   const refresh = useCallback(async (opts = {}) => {
     const silent = !!opts.silent;
+
+    // Mainnet: only balances are needed here — quotes are handled separately.
+    if (isMainnet) {
+      if (refreshingRef.current) return;
+      refreshingRef.current = true;
+      if (!silent) setLoading(true);
+      setError(null);
+      try {
+        const bals = await getMainnetBalances(address);
+        setMainnetBalances(bals.formatted);
+        setPoolUpdatedAt(Date.now());
+      } catch (err) {
+        console.error(err);
+        if (!silent) {
+          setError(
+            isRateLimitError(err)
+              ? 'The RPC endpoint is rate-limiting requests right now. Try Refresh again in a moment.'
+              : err.message || 'Failed to load balances.'
+          );
+        }
+      }
+      if (!silent) setLoading(false);
+      refreshingRef.current = false;
+      return;
+    }
+
     if (!pool) {
       setPoolState(null);
       setError(null);
@@ -217,21 +303,21 @@ export default function SwapPage() {
 
     if (!silent) setLoading(false);
     refreshingRef.current = false;
-  }, [address, pool]);
+  }, [address, pool, isMainnet]);
 
   // Refetch whenever the wallet OR the selected pair (and therefore pool) changes.
   useEffect(() => { refresh(); }, [refresh]);
 
   // Quiet background auto-refresh so the rate ticker stays live, Uniswap-style.
   useEffect(() => {
-    if (!pool) return;
+    if (!pool && !isMainnet) return;
     const id = setInterval(() => refresh({ silent: true }), AUTO_REFRESH_MS);
     return () => clearInterval(id);
-  }, [pool, refresh]);
+  }, [pool, isMainnet, refresh]);
 
   // Re-quote whenever the pay amount, pair, or pool reserves change (direct mode).
   useEffect(() => {
-    if (engineMode !== 'direct') return;
+    if (engineMode !== 'direct' || isMainnet) return;
     let cancelled = false;
 
     async function runQuote() {
@@ -253,11 +339,11 @@ export default function SwapPage() {
 
     runQuote();
     return () => { cancelled = true; };
-  }, [engineMode, payAmount, payToken, receiveToken, pool, poolState]);
+  }, [engineMode, isMainnet, payAmount, payToken, receiveToken, pool, poolState]);
 
   // Re-quote via ArrowRouter whenever amount/pair changes (router mode), debounced.
   useEffect(() => {
-    if (engineMode !== 'router') return;
+    if (engineMode !== 'router' || isMainnet) return;
 
     if (!payAmount || parseFloat(payAmount) <= 0 || !payTokenData?.address || !receiveTokenData?.address) {
       setRoute(null);
@@ -292,7 +378,7 @@ export default function SwapPage() {
     }, ROUTER_QUOTE_DEBOUNCE_MS);
 
     return () => clearTimeout(timer);
-  }, [engineMode, payAmount, payTokenData, receiveTokenData]);
+  }, [engineMode, isMainnet, payAmount, payTokenData, receiveTokenData]);
 
   // Independent 1-unit quote that powers the "1 USDC = 0.998 EURC" ticker,
   // so it stays live even before the user has typed an amount. Direct-mode only.
@@ -311,6 +397,69 @@ export default function SwapPage() {
     return () => { cancelled = true; };
   }, [engineMode, pool, poolState, payToken, receiveToken]);
 
+  // ── Mainnet: read the ArrowDEX fee straight from the fee router contract,
+  // so the fee shown in the UI can never drift from what the contract charges.
+  useEffect(() => {
+    if (!isMainnet) return;
+    let cancelled = false;
+    setFeeError(false);
+    readFeeBps()
+      .then((v) => { if (!cancelled) setFeeBps(v); })
+      .catch((err) => {
+        console.error('Fee router read failed:', err);
+        if (!cancelled) { setFeeBps(null); setFeeError(true); }
+      });
+    return () => { cancelled = true; };
+  }, [isMainnet]);
+
+  // ── Mainnet: quote through ArrowRoute (KyberSwap's aggregator) on the amount left AFTER the ArrowDEX fee.
+  useEffect(() => {
+    if (!isMainnet) return;
+
+    const grossRaw = payTokenData ? parseAmount(payAmount, payTokenData.decimals) : null;
+    if (grossRaw == null || !receiveTokenData || feeBps == null) {
+      setUniQuote(null);
+      setUniError(null);
+      setUniLoading(false);
+      setReceiveAmount('0.00');
+      return;
+    }
+
+    const thisRequest = ++uniRequestId.current;
+    setUniLoading(true);
+    setUniError(null);
+
+    const timer = setTimeout(async () => {
+      try {
+        const { net } = splitFee(grossRaw, feeBps);
+        const q = await getUniQuote({ tokenIn: payTokenData, tokenOut: receiveTokenData, amountInRaw: net });
+        if (uniRequestId.current !== thisRequest) return; // stale response, ignore
+        setUniQuote(q);
+        if (q) {
+          const v = parseFloat(q.amountOut);
+          setReceiveAmount(receiveTokenData.decimals === 8 ? v.toFixed(8) : v.toFixed(v < 1 ? 4 : 2));
+        } else {
+          setReceiveAmount('0.00');
+        }
+      } catch (err) {
+        console.error('ArrowRoute quote failed:', err);
+        if (uniRequestId.current === thisRequest) {
+          setUniQuote(null);
+          setReceiveAmount('0.00');
+          setUniError(
+            isRateLimitError(err)
+              ? 'The RPC endpoint is rate-limiting requests right now. Try again in a moment.'
+              : err.shortMessage || err.message || 'Could not get a quote from ArrowRoute.'
+          );
+        }
+      } finally {
+        if (uniRequestId.current === thisRequest) setUniLoading(false);
+      }
+    }, ROUTER_QUOTE_DEBOUNCE_MS);
+
+    return () => clearTimeout(timer);
+  }, [isMainnet, payAmount, payTokenData, receiveTokenData, feeBps]);
+
   // Reset the "I understand the risk" ack whenever the trade shape changes.
   useEffect(() => { setImpactAck(false); }, [payAmount, payToken, receiveToken, engineMode]);
 
@@ -324,9 +473,11 @@ export default function SwapPage() {
 
   // Unified price impact number regardless of mode, so the rest of the UI
   // (color coding, the confirmation gate) doesn't need to branch everywhere.
-  const priceImpactPct = engineMode === 'router'
-    ? (route?.priceImpactBps != null ? Number(route.priceImpactBps) / 100 : null)
-    : directPriceImpactPct;
+  const priceImpactPct = isMainnet
+    ? (uniQuote?.priceImpactPct ?? null)
+    : engineMode === 'router'
+      ? (route?.priceImpactBps != null ? Number(route.priceImpactBps) / 100 : null)
+      : directPriceImpactPct;
 
   const impactTone = priceImpactPct == null
     ? 'text-dim'
@@ -339,9 +490,29 @@ export default function SwapPage() {
           : 'text-success';
 
   const needsImpactAck = priceImpactPct != null && priceImpactPct >= IMPACT_BLOCK;
-  const minimumReceived = parseFloat(receiveAmount) > 0
-    ? (parseFloat(receiveAmount) * (1 - effectiveSlippage / 100))
-    : 0;
+  const minimumReceived = isMainnet
+    ? (uniQuote
+        ? parseFloat(formatRaw((uniQuote.amountOutRaw * BigInt(10000 - slipBps)) / 10000n, receiveTokenData.decimals))
+        : 0)
+    : (parseFloat(receiveAmount) > 0
+        ? (parseFloat(receiveAmount) * (1 - effectiveSlippage / 100))
+        : 0);
+
+  // Mainnet: what the user pays in fees, and whether they can afford the trade.
+  const grossRawMainnet = isMainnet && payTokenData ? parseAmount(payAmount, payTokenData.decimals) : null;
+  const feeRawMainnet = grossRawMainnet != null && feeBps != null ? splitFee(grossRawMainnet, feeBps).fee : null;
+  const insufficient = isMainnet
+    && grossRawMainnet != null
+    && payBalance != null
+    && grossRawMainnet > (parseAmount(payBalance, payTokenData.decimals) ?? 0n);
+
+  // Rate ticker value: amount of `receiveToken` per 1 `payToken` (null = nothing to show yet).
+  const grossNum = parseFloat(payAmount);
+  const tickerRate = isMainnet
+    ? (uniQuote && grossNum > 0 ? parseFloat(uniQuote.amountOut) / grossNum : null)
+    : engineMode === 'router'
+      ? (route?.amountOut && grossNum > 0 ? parseFloat(route.amountOut) / grossNum : null)
+      : unitRate;
 
   function flipTokens() {
     const p = payToken;
@@ -351,7 +522,7 @@ export default function SwapPage() {
   }
 
   function selectToken(symbol) {
-    const token = TOKENS.find((t) => t.symbol === symbol);
+    const token = tokenList.find((t) => t.symbol === symbol);
     if (token?.disabled) return;
 
     if (pickerOpen === 'pay') {
@@ -368,6 +539,12 @@ export default function SwapPage() {
 
   function setPercent(pct) {
     if (!payBalance) return;
+    if (isMainnet) {
+      // Leaves a small USDC reserve for gas (USDC is Arc's gas token).
+      const v = computeSpendable(payBalance, payTokenData, pct);
+      setPayAmount(v === '0' ? '' : v);
+      return;
+    }
     const amt = parseFloat(payBalance) * pct;
     setPayAmount(pct === 1 ? payBalance : amt.toFixed(6));
   }
@@ -382,6 +559,53 @@ export default function SwapPage() {
   }
 
   async function handleReviewSwap() {
+    // ── Mainnet: ArrowRoute (KyberSwap aggregator) via the ArrowDEX fee router ──
+    if (isMainnet) {
+      if (!uniQuote || feeBps == null || insufficient) return;
+      if (needsImpactAck && !impactAck) return;
+
+      setModalOpen(true);
+      setModalStep(0);
+      setModalDone(false);
+      setModalError(null);
+      setTxHash(null);
+
+      try {
+        const amountInRaw = parseAmount(payAmount, payTokenData.decimals);
+        if (amountInRaw == null) throw new Error('Enter a valid amount.');
+        // Slippage applied to the quote of the amount left after the ArrowDEX fee.
+        const minAmountOutRaw = (uniQuote.amountOutRaw * BigInt(10000 - slipBps)) / 10000n;
+
+        setModalStep(1);
+        const hash = await executeUniSwap({
+          account: address,
+          tokenIn: payTokenData,
+          tokenOut: receiveTokenData,
+          amountInRaw,
+          minAmountOutRaw,
+          route: uniQuote,
+          onStatus: setModalStatus,
+        });
+
+        setTxHash(hash);
+        // No txHash passed on purpose: the shared notification may build testnet explorer links.
+        notify({
+          type: 'swap',
+          title: `Swapped ${payAmount} ${payToken} → ${receiveAmount} ${receiveToken}`,
+          message: `Filled via ArrowRoute · ${feePctLabel} ArrowDEX fee`,
+        });
+        setModalStep(2);
+        setModalDone(true);
+        setPayAmount('');
+        setUniQuote(null);
+        refresh();
+      } catch (err) {
+        console.error(err);
+        setModalError(err.shortMessage || err.message || 'Swap failed.');
+      }
+      return;
+    }
+
     if (engineMode === 'direct' && !pool) return;
     if (engineMode === 'router' && (!route || route.path.length === 0)) return;
     if (needsImpactAck && !impactAck) return;
@@ -442,11 +666,14 @@ export default function SwapPage() {
     }
   }
 
-  const canSwap = engineMode === 'router'
-    ? (route && route.path.length > 0 && payAmount && parseFloat(payAmount) > 0 && !routeLoading
+  const canSwap = isMainnet
+    ? (uniQuote && grossNum > 0 && !uniLoading && feeBps != null && !insufficient
         && parseFloat(receiveAmount) > 0 && !(needsImpactAck && !impactAck))
-    : (pool && payAmount && parseFloat(payAmount) > 0 && !quoting
-        && parseFloat(receiveAmount) > 0 && !(needsImpactAck && !impactAck));
+    : engineMode === 'router'
+      ? (route && route.path.length > 0 && payAmount && parseFloat(payAmount) > 0 && !routeLoading
+          && parseFloat(receiveAmount) > 0 && !(needsImpactAck && !impactAck))
+      : (pool && payAmount && parseFloat(payAmount) > 0 && !quoting
+          && parseFloat(receiveAmount) > 0 && !(needsImpactAck && !impactAck));
 
   return (
     <AppShell>
@@ -458,10 +685,12 @@ export default function SwapPage() {
             <h1 className="text-[30px] font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-ivory via-ivory to-violetglow/90">
               Swap Assets
             </h1>
-            <p className="text-dim text-[13px] mt-1.5">Real swaps on Arc Testnet.</p>
+            <p className="text-dim text-[13px] mt-1.5">
+              {isMainnet ? 'Live swaps on Arc Mainnet, routed through ArrowRoute.' : 'Real swaps on Arc Testnet.'}
+            </p>
           </div>
           <div className="flex flex-col items-end gap-2 flex-shrink-0">
-            <NetworkModeToggle mode="testnet" onChange={setNetworkMode} />
+            <NetworkModeToggle mode={isMainnet ? 'mainnet' : 'testnet'} onChange={setNetworkMode} mainnetReady={MAINNET_READY} />
             <button
               onClick={() => refresh()}
               disabled={loading}
@@ -472,21 +701,30 @@ export default function SwapPage() {
           </div>
         </div>
 
-        {/* Engine mode toggle — ArrowSwap Engine (direct) vs ArrowRouter (best price) */}
-        <div className="mb-4">
-          <RouteEngineToggle
-            mode={engineMode}
-            onModeChange={setEngineMode}
-            route={route}
-            loading={routeLoading}
-            tokenInSymbol={payToken}
-            tokenOutSymbol={receiveToken}
-            knownSymbols={Object.fromEntries(TOKENS.filter((t) => t.address).map((t) => [t.address.toLowerCase(), t.symbol]))}
-          />
-        </div>
+        {/* Mainnet notice — real funds */}
+        {isMainnet && (
+          <div className="mb-4 text-[12px] text-amber-400 bg-amber-400/[0.06] border border-amber-400/20 rounded-[12px] px-3.5 py-2.5">
+            Arc Mainnet — swaps use real funds. ArrowRoute compares Aero, Uniswap and other Arc DEXs for the best price; ArrowDEX adds a {feePctLabel} fee per swap.
+          </div>
+        )}
 
-        {/* ArrowSwap Engine contract badge — the "not just an address" ask. Direct mode only. */}
-        {engineMode === 'direct' && (
+        {/* Engine mode toggle — ArrowSwap Engine (direct) vs ArrowRouter (best price). Testnet only. */}
+        {!isMainnet && (
+          <div className="mb-4">
+            <RouteEngineToggle
+              mode={engineMode}
+              onModeChange={setEngineMode}
+              route={route}
+              loading={routeLoading}
+              tokenInSymbol={payToken}
+              tokenOutSymbol={receiveToken}
+              knownSymbols={Object.fromEntries(TOKENS.filter((t) => t.address).map((t) => [t.address.toLowerCase(), t.symbol]))}
+            />
+          </div>
+        )}
+
+        {/* Contract badge — the "not just an address" ask. Testnet: direct mode. Mainnet: the ArrowDEX fee router. */}
+        {(isMainnet || engineMode === 'direct') && (
           <div className="relative mb-4">
             <button
               onClick={() => setEngineOpen((v) => !v)}
@@ -496,12 +734,14 @@ export default function SwapPage() {
                 <EngineLogo className="w-7 h-7" />
                 <div className="text-left">
                   <div className="text-[13px] font-bold flex items-center gap-1.5 text-ivory">
-                    Routed via ArrowSwap Engine
+                    {isMainnet ? 'Routed via ArrowRoute' : 'Routed via ArrowSwap Engine'}
                     <svg viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5 text-indigo-bright">
                       <path fillRule="evenodd" d="M10 1.5l2.163 1.44 2.59-.2 1.02 2.393 2.393 1.02-.2 2.59L19.5 10l-1.44 2.163.2 2.59-2.393 1.02-1.02 2.393-2.59-.2L10 19.5l-2.163-1.44-2.59.2-1.02-2.393-2.393-1.02.2-2.59L.5 10l1.44-2.163-.2-2.59 2.393-1.02 1.02-2.393 2.59.2L10 1.5zm3.03 6.28a.75.75 0 00-1.06-1.06L8.5 10.19l-1.47-1.47a.75.75 0 00-1.06 1.06l2 2a.75.75 0 001.06 0l3.5-3.5z" clipRule="evenodd" />
                     </svg>
                   </div>
-                  <div className="text-[11px] text-dim mt-0.5 tracking-wide">0.30% fee pool · verified contract</div>
+                  <div className="text-[11px] text-dim mt-0.5 tracking-wide">
+                    {isMainnet ? `Best price across Arc DEXs · ${feePctLabel} ArrowDEX fee` : '0.30% fee pool · verified contract'}
+                  </div>
                 </div>
               </div>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={`w-4 h-4 text-dim transition-transform duration-300 ${engineOpen ? 'rotate-180 text-indigo-bright' : ''}`}><path d="M6 9l6 6 6-6" /></svg>
@@ -512,8 +752,10 @@ export default function SwapPage() {
                 <div className="flex items-center gap-3 mb-3.5">
                   <EngineLogo className="w-10 h-10" />
                   <div>
-                    <div className="text-sm font-bold text-ivory">ArrowSwap Engine</div>
-                    <div className="text-[11px] text-dim">Automated market maker · Arc Testnet</div>
+                    <div className="text-sm font-bold text-ivory">{isMainnet ? 'ArrowDEX Fee Router' : 'ArrowSwap Engine'}</div>
+                    <div className="text-[11px] text-dim">
+                      {isMainnet ? 'Aggregates Aero, Uniswap & others · Arc Mainnet' : 'Automated market maker · Arc Testnet'}
+                    </div>
                   </div>
                 </div>
                 <div className="text-[10.5px] text-dim mb-1.5 uppercase tracking-[0.14em] font-semibold">Contract address</div>
@@ -526,7 +768,7 @@ export default function SwapPage() {
                       <button onClick={copyAddress} className="text-indigo-bright hover:text-violetglow text-[11px] font-semibold flex-shrink-0 transition-colors">
                         {copied ? 'Copied' : 'Copy'}
                       </button>
-                      <a href={EXPLORER_ADDR(engineAddress)} target="_blank" rel="noreferrer" className="text-indigo-bright hover:text-violetglow text-[11px] font-semibold flex-shrink-0 transition-colors">
+                      <a href={explorerAddr(engineAddress)} target="_blank" rel="noreferrer" className="text-indigo-bright hover:text-violetglow text-[11px] font-semibold flex-shrink-0 transition-colors">
                         View ↗
                       </a>
                     </>
@@ -542,14 +784,29 @@ export default function SwapPage() {
             {error}
           </div>
         )}
-        {engineMode === 'direct' && !pool && (
+        {isMainnet && feeError && (
+          <div className="mb-4 text-[13px] text-danger bg-danger/[0.06] border border-danger/20 rounded-[12px] px-3.5 py-2.5">
+            Couldn't reach the ArrowDEX fee router on Arc Mainnet. Swaps are paused.
+          </div>
+        )}
+        {isMainnet && uniError && (
+          <div className="mb-4 text-[13px] text-danger bg-danger/[0.06] border border-danger/20 rounded-[12px] px-3.5 py-2.5">
+            {uniError}
+          </div>
+        )}
+        {!isMainnet && engineMode === 'direct' && !pool && (
           <div className="mb-4 text-sm text-dim">
             There's no direct pool for {payToken} → {receiveToken} yet.
           </div>
         )}
-        {engineMode === 'router' && !routeLoading && route && route.path.length === 0 && payAmount && (
+        {!isMainnet && engineMode === 'router' && !routeLoading && route && route.path.length === 0 && payAmount && (
           <div className="mb-4 text-sm text-dim">
             ArrowRouter couldn't find a route for {payToken} → {receiveToken} yet.
+          </div>
+        )}
+        {isMainnet && !uniLoading && !uniError && !uniQuote && feeBps != null && grossNum > 0 && (
+          <div className="mb-4 text-sm text-dim">
+            ArrowRoute has no route for {payToken} → {receiveToken} at this size yet.
           </div>
         )}
 
@@ -573,27 +830,17 @@ export default function SwapPage() {
                 <button
                   onClick={() => setRateFlipped((v) => !v)}
                   className="flex items-center gap-1.5 text-[12px] text-dim hover:text-ivory transition-colors bg-white/[0.03] hover:bg-white/[0.05] rounded-full px-3 py-1.5 border border-white/5"
-                  disabled={engineMode === 'direct' ? unitRate == null : !route?.amountOut}
+                  disabled={tickerRate == null}
                 >
                   <span className="w-1.5 h-1.5 rounded-full bg-success shadow-[0_0_6px_theme(colors.success)] animate-pulse" />
-                  {engineMode === 'router' ? (
-                    route?.amountOut && parseFloat(payAmount) > 0 ? (
-                      rateFlipped ? (
-                        <>1 {receiveToken} = {fmt(parseFloat(payAmount) / parseFloat(route.amountOut), 6)} {payToken}</>
-                      ) : (
-                        <>1 {payToken} = {fmt(parseFloat(route.amountOut) / parseFloat(payAmount), 6)} {receiveToken}</>
-                      )
-                    ) : (
-                      'Enter an amount to see the routed rate…'
-                    )
-                  ) : unitRate == null ? (
-                    'Fetching live rate…'
+                  {tickerRate == null ? (
+                    !isMainnet && engineMode === 'direct' ? 'Fetching live rate…' : 'Enter an amount to see the routed rate…'
                   ) : rateFlipped ? (
-                    <>1 {receiveToken} = {fmt(1 / unitRate, 6)} {payToken}</>
+                    <>1 {receiveToken} = {fmt(1 / tickerRate, 6)} {payToken}</>
                   ) : (
-                    <>1 {payToken} = {fmt(unitRate, 6)} {receiveToken}</>
+                    <>1 {payToken} = {fmt(tickerRate, 6)} {receiveToken}</>
                   )}
-                  {((engineMode === 'direct' && unitRate != null) || (engineMode === 'router' && route?.amountOut)) && (
+                  {tickerRate != null && (
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3 h-3 opacity-60"><path d="M7 16V4M7 4L3 8M7 4l4 4M17 8v12M17 20l4-4M17 20l-4-4" /></svg>
                   )}
                 </button>
@@ -650,7 +897,7 @@ export default function SwapPage() {
                 <div className="flex justify-between text-[11px] text-dim mb-3 tracking-wide">
                   <span>You pay</span>
                   <span className="flex items-center gap-2">
-                    Balance: <span className="font-mono text-ivory/70">{payBalance ? fmt(payBalance) : '—'}</span>
+                    Balance: <span className="font-mono text-ivory/70">{payBalance ? fmt(payBalance, balDigits(payToken)) : '—'}</span>
                     <span className="flex gap-1">
                       {[0.25, 0.5, 0.75].map((p) => (
                         <button key={p} onClick={() => setPercent(p)} className="text-indigo-bright/80 hover:text-violetglow font-semibold transition-colors">
@@ -679,7 +926,14 @@ export default function SwapPage() {
                   />
                 </div>
                 {pickerOpen === 'pay' && (
-                  <TokenPicker tokens={filteredTokens} onSelect={selectToken} query={pickerQuery} setQuery={setPickerQuery} poolState={poolState} />
+                  <TokenPicker
+                    tokens={filteredTokens}
+                    onSelect={selectToken}
+                    query={pickerQuery}
+                    setQuery={setPickerQuery}
+                    poolState={isMainnet ? { balancesFormatted: mainnetBalances } : poolState}
+                    digitsFor={balDigits}
+                  />
                 )}
               </div>
 
@@ -697,7 +951,7 @@ export default function SwapPage() {
               <div className="bg-black/30 border border-white/[0.06] rounded-[18px] p-5">
                 <div className="flex justify-between text-[11px] text-dim mb-3 tracking-wide">
                   <span>You receive</span>
-                  <span>Balance: <span className="font-mono text-ivory/70">{receiveBalance ? fmt(receiveBalance) : '—'}</span></span>
+                  <span>Balance: <span className="font-mono text-ivory/70">{receiveBalance ? fmt(receiveBalance, balDigits(receiveToken)) : '—'}</span></span>
                 </div>
                 <div className="flex justify-between items-center gap-3">
                   <button
@@ -709,13 +963,20 @@ export default function SwapPage() {
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5 opacity-60"><path d="M6 9l6 6 6-6" /></svg>
                   </button>
                   <div className="font-mono text-[28px] tracking-tight tabular-nums text-ivory">
-                    {(engineMode === 'direct' ? quoting : routeLoading) ? (
+                    {(isMainnet ? uniLoading : engineMode === 'direct' ? quoting : routeLoading) ? (
                       <span className="text-dim animate-pulse">…</span>
                     ) : receiveAmount}
                   </div>
                 </div>
                 {pickerOpen === 'receive' && (
-                  <TokenPicker tokens={filteredTokens} onSelect={selectToken} query={pickerQuery} setQuery={setPickerQuery} poolState={poolState} />
+                  <TokenPicker
+                    tokens={filteredTokens}
+                    onSelect={selectToken}
+                    query={pickerQuery}
+                    setQuery={setPickerQuery}
+                    poolState={isMainnet ? { balancesFormatted: mainnetBalances } : poolState}
+                    digitsFor={balDigits}
+                  />
                 )}
               </div>
 
@@ -724,7 +985,7 @@ export default function SwapPage() {
                 <div className="flex justify-between text-[11.5px] text-dim">
                   <span>Route</span>
                   <span className="font-mono text-ivory/80">
-                    {payToken} → {receiveToken} · {engineMode === 'router' ? 'ArrowRouter' : 'ArrowSwap Engine'}
+                    {isMainnet && uniQuote ? uniQuote.symbols.join(' → ') : `${payToken} → ${receiveToken}`} · {engineName}
                   </span>
                 </div>
                 <div className="flex justify-between text-[11.5px] text-dim">
@@ -733,17 +994,31 @@ export default function SwapPage() {
                 </div>
                 <div className="flex justify-between text-[11.5px] text-dim">
                   <span>Minimum received</span>
-                  <span className="font-mono tabular-nums text-ivory/80">{minimumReceived > 0 ? `${fmt(minimumReceived)} ${receiveToken}` : '—'}</span>
+                  <span className="font-mono tabular-nums text-ivory/80">{minimumReceived > 0 ? `${fmt(minimumReceived, balDigits(receiveToken))} ${receiveToken}` : '—'}</span>
                 </div>
                 <div className="flex justify-between text-[11.5px] text-dim">
                   <span>Slippage tolerance</span>
                   <span className="font-mono tabular-nums text-ivory/80">{effectiveSlippage}%</span>
                 </div>
+                {isMainnet && (
+                  <div className="flex justify-between text-[11.5px] text-dim">
+                    <span>ArrowDEX fee ({feePctLabel})</span>
+                    <span className="font-mono tabular-nums text-ivory/80">
+                      {feeRawMainnet != null && feeRawMainnet > 0n
+                        ? `${fmt(formatRaw(feeRawMainnet, payTokenData.decimals), 6)} ${payToken}`
+                        : '—'}
+                    </span>
+                  </div>
+                )}
                 <div className="flex justify-between text-[11.5px] text-dim">
                   <span>Pool fee</span>
-                  <span className="font-mono tabular-nums">0.30%</span>
+                  <span className="font-mono tabular-nums">
+                    {isMainnet
+                      ? (uniQuote?.poolFeePct != null ? `${uniQuote.poolFeePct.toFixed(3)}%` : '—')
+                      : '0.30%'}
+                  </span>
                 </div>
-                {engineMode === 'direct' && poolState && (
+                {!isMainnet && engineMode === 'direct' && poolState && (
                   <div className="flex justify-between text-[11.5px] text-dim">
                     <span>Pool liquidity</span>
                     <span className="font-mono tabular-nums text-ivory/80">
@@ -786,13 +1061,17 @@ export default function SwapPage() {
                     <span className="absolute inset-0 bg-gradient-to-r from-transparent via-white/15 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-700" />
                   )}
                   <span className="relative">
-                    {engineMode === 'direct' && !pool
-                      ? 'No Pool for This Pair'
-                      : engineMode === 'router' && (!route || route.path.length === 0) && payAmount
+                    {isMainnet && insufficient
+                      ? 'Insufficient Balance'
+                      : isMainnet && !uniLoading && !uniQuote && grossNum > 0 && feeBps != null
                         ? 'No Route Found'
-                        : needsImpactAck && !impactAck
-                          ? 'Confirm Price Impact Above'
-                          : 'Review Swap'}
+                        : !isMainnet && engineMode === 'direct' && !pool
+                          ? 'No Pool for This Pair'
+                          : !isMainnet && engineMode === 'router' && (!route || route.path.length === 0) && payAmount
+                            ? 'No Route Found'
+                            : needsImpactAck && !impactAck
+                              ? 'Confirm Price Impact Above'
+                              : 'Review Swap'}
                   </span>
                 </button>
               )}
@@ -808,7 +1087,7 @@ export default function SwapPage() {
             {modalDone ? 'Swap Successful' : `Swapping ${payAmount} ${payToken}`}
           </h2>
           <p className="text-dim text-sm mt-1">
-            {payToken} → {receiveToken} via {engineMode === 'router' ? 'ArrowRouter' : 'ArrowSwap Engine'}
+            {payToken} → {receiveToken} via {engineName}
           </p>
         </div>
 
@@ -829,7 +1108,7 @@ export default function SwapPage() {
           </div>
         )}
         {modalDone && txHash && (
-          <a href={EXPLORER_TX(txHash)} target="_blank" rel="noreferrer" className="text-indigo-bright hover:text-violetglow text-sm font-mono transition-colors">
+          <a href={explorerTx(txHash)} target="_blank" rel="noreferrer" className="text-indigo-bright hover:text-violetglow text-sm font-mono transition-colors">
             View transaction →
           </a>
         )}
@@ -865,7 +1144,7 @@ export default function SwapPage() {
   );
 }
 
-function TokenPicker({ tokens, onSelect, query, setQuery, poolState }) {
+function TokenPicker({ tokens, onSelect, query, setQuery, poolState, digitsFor = () => 4 }) {
   return (
     <div className="mt-3 bg-black/50 border border-white/[0.08] rounded-[16px] overflow-hidden">
       <div className="p-2.5 border-b border-white/[0.06]">
@@ -899,7 +1178,7 @@ function TokenPicker({ tokens, onSelect, query, setQuery, poolState }) {
               <div className="text-[11px] text-dim">{t.name}</div>
             </div>
             {poolState?.balancesFormatted?.[t.symbol] != null && (
-              <div className="text-[11px] text-dim font-mono tabular-nums">{fmt(poolState.balancesFormatted[t.symbol])}</div>
+              <div className="text-[11px] text-dim font-mono tabular-nums">{fmt(poolState.balancesFormatted[t.symbol], digitsFor(t.symbol))}</div>
             )}
           </button>
         ))}

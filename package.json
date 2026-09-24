@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.2",
+    "@uniswap/sdk-core": "^7.19.3",
+    "@uniswap/v4-sdk": "^2.4.0",
     "@walletconnect/ethereum-provider": "^2.23.10",
     "lightweight-charts": "^5.2.0",
     "lucide-react": "^1.34.0",

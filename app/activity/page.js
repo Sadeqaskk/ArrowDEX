@@ -6,12 +6,13 @@ import { useWallet } from '../../lib/WalletContext';
 import { fetchActivity } from '../../lib/activity';
 import { CHAINS, getChainList } from '../../lib/chains';
 
-// Testnet shows every contract we scan. Mainnet only has Bridge live right
-// now, so it gets a single Bridge filter and nothing else.
+// Testnet shows every contract we scan. Mainnet shows Swap, Liquidity and
+// Bridge; Vault is listed but locked until it launches.
 const FILTERS_BY_MODE = {
   testnet: ['All', 'Pool', 'Vault', 'WUSDC'],
-  mainnet: ['Bridge'],
+  mainnet: ['All', 'Swap', 'Liquidity', 'Bridge', 'Vault'],
 };
+const COMING_SOON_MAINNET = ['Vault'];
 
 function LivePulse({ ok }) {
   return <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${ok ? 'bg-success animate-pulse' : 'bg-dim/40'}`} />;
@@ -85,8 +86,9 @@ export default function ActivityPage() {
 
   const filters = FILTERS_BY_MODE[isMainnet ? 'mainnet' : 'testnet'];
 
-  // Default explorer per mode. Bridge events that carry their own `explorer`
-  // (e.g. a tx on Ethereum) use that instead — see the tx link below.
+  // Default explorer per mode. Events that carry their own `explorer`
+  // (mainnet events, or a bridge tx on another chain) use that instead — see
+  // the tx link below.
   const defaultExplorer = useMemo(() => {
     if (!isMainnet) return CHAINS.arcTestnet.explorer;
     const arcMain = getChainList('mainnet').find((c) => c.key === 'arcMainnet');
@@ -102,7 +104,7 @@ export default function ActivityPage() {
   useEffect(() => {
     setEvents([]);
     setError(null);
-    setFilter(isMainnet ? 'Bridge' : 'All');
+    setFilter('All');
   }, [isMainnet]);
 
   const refresh = useCallback(async () => {
@@ -111,7 +113,7 @@ export default function ActivityPage() {
     setError(null);
     try {
       const activity = isMainnet
-        ? (await fetchActivity(address, networkMode)).filter((e) => e.source === 'Bridge')
+        ? await fetchActivity(address, networkMode)
         : await fetchActivity(address);
       setEvents(activity);
     } catch (err) {
@@ -125,7 +127,7 @@ export default function ActivityPage() {
   useEffect(() => { refresh(); }, [refresh]);
 
   const counts = useMemo(() => {
-    const c = { All: events.length, Pool: 0, Vault: 0, WUSDC: 0, Bridge: 0 };
+    const c = { All: events.length, Pool: 0, Vault: 0, WUSDC: 0, Swap: 0, Liquidity: 0, Bridge: 0 };
     for (const e of events) {
       if (c[e.source] != null) c[e.source] += 1;
     }
@@ -154,7 +156,7 @@ export default function ActivityPage() {
             <h1 className="text-[28px] font-bold">Activity</h1>
             <p className="text-dim text-sm mt-1.5">
               {isMainnet
-                ? 'Your Bridge transfers on Mainnet — Bridge is the only product live on Mainnet right now.'
+                ? 'Your swaps, liquidity and bridge transfers on Arc Mainnet. Vault is coming soon.'
                 : 'Real transaction history, scanned directly from Arc Testnet — no explorer API, no mock data.'}
             </p>
           </div>
@@ -170,7 +172,7 @@ export default function ActivityPage() {
 
         {isMainnet && (
           <div className="mb-4 text-[12.5px] text-ivory bg-indigo/[0.08] border border-indigo-bright/25 rounded-[12px] px-3.5 py-2.5 leading-relaxed">
-            You&apos;re viewing real Mainnet activity. Swaps, pools and vaults will show up here once they go live on Mainnet.
+            You&apos;re viewing real Mainnet activity. Vault activity will show up here once it goes live on Mainnet.
           </div>
         )}
 
@@ -213,20 +215,34 @@ export default function ActivityPage() {
             )}
 
             <div className="flex gap-2 mb-5 flex-wrap">
-              {filters.map((f) => (
-                <button
-                  key={f}
-                  onClick={() => setFilter(f)}
-                  className={`px-4 py-2 rounded-full text-xs font-semibold transition-colors flex items-center gap-1.5 ${filter === f ? 'bg-indigo/15 text-indigo-bright' : 'bg-white/[0.03] text-dim hover:text-ivory'}`}
-                >
-                  {f}
-                  {counts[f] > 0 && (
-                    <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full ${filter === f ? 'bg-indigo-bright/20' : 'bg-white/5'}`}>
-                      {counts[f]}
-                    </span>
-                  )}
-                </button>
-              ))}
+              {filters.map((f) => {
+                const soon = isMainnet && COMING_SOON_MAINNET.includes(f);
+                return (
+                  <button
+                    key={f}
+                    onClick={() => !soon && setFilter(f)}
+                    disabled={soon}
+                    className={`px-4 py-2 rounded-full text-xs font-semibold transition-colors flex items-center gap-1.5 ${
+                      soon
+                        ? 'bg-white/[0.02] text-dim/50 cursor-not-allowed'
+                        : filter === f
+                          ? 'bg-indigo/15 text-indigo-bright'
+                          : 'bg-white/[0.03] text-dim hover:text-ivory'
+                    }`}
+                  >
+                    {f}
+                    {soon ? (
+                      <span className="text-[8.5px] font-semibold bg-white/5 text-dim px-1.5 py-0.5 rounded-full">Soon</span>
+                    ) : (
+                      counts[f] > 0 && (
+                        <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full ${filter === f ? 'bg-indigo-bright/20' : 'bg-white/5'}`}>
+                          {counts[f]}
+                        </span>
+                      )
+                    )}
+                  </button>
+                );
+              })}
             </div>
 
             <div className="glass p-2">
@@ -252,7 +268,7 @@ export default function ActivityPage() {
                   </div>
                   <div className="text-dim text-sm">
                     {isMainnet
-                      ? 'No bridge activity found for this wallet on Mainnet yet.'
+                      ? `No ${filter !== 'All' ? `${filter.toLowerCase()} ` : ''}activity found for this wallet on Mainnet yet.`
                       : `No ${filter !== 'All' ? filter.toLowerCase() : ''} activity found for this wallet yet.`}
                   </div>
                 </div>
@@ -307,7 +323,7 @@ export default function ActivityPage() {
 
             <p className="text-[11px] text-dim mt-5 leading-relaxed">
               {isMainnet
-                ? `Bridge transfers tied to your address on ${networkName}. Other products will appear here once they launch on Mainnet.`
+                ? `Swaps, liquidity and bridge transfers tied to your address on ${networkName}, read from the Arc explorer. Vault will appear here once it launches on Mainnet.`
                 : `Scanned live from ${networkName} via public RPC — covers Pool, Vault, and WUSDC contract events tied to your address. Very old activity could be missed if the chain grows beyond what a single log query can cover in one call.`}
             </p>
           </>
